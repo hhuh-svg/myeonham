@@ -12,6 +12,9 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Dongle:wght@300;400;700&display=swap" rel="stylesheet">
 <style>
 :root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 body{margin:0;-webkit-text-size-adjust:100%}
@@ -21,7 +24,7 @@ body{margin:0;-webkit-text-size-adjust:100%}
 :root{
   --bg:#F2F6F4; --surface:#FFFFFF; --ink:#152420; --muted:#5C6E67; --line:#DCE6E1;
   --accent:#106E5A; --accent-soft:#DFF0EA; --danger:#B4372F; --ok:#2C7A4B; --up:#C23B3B; --down:#1C6FD1;
-  --font-body:-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+  --font-body:'Dongle',-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
   --font-mono:ui-monospace,Menlo,monospace;
   --r:12px;
 }
@@ -32,7 +35,7 @@ body{margin:0;-webkit-text-size-adjust:100%}
   --bg:#0D1613; --surface:#15201C; --ink:#E7EFEB; --muted:#92A49C; --line:#263530;
   --accent:#58C7A8; --accent-soft:#17352B; --danger:#E5877F; --ok:#6CC491; --up:#E5877F; --down:#7FB4F2; color-scheme:dark}
 html,body{height:100%}
-body{background:var(--bg);color:var(--ink);font-family:var(--font-body);font-size:15px;line-height:1.5}
+body{background:var(--bg);color:var(--ink);font-family:var(--font-body);font-size:17px;line-height:1.5}
 body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
 button,input,select,textarea{font:inherit;color:inherit}
 button{cursor:pointer}
