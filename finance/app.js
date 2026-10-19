@@ -46,8 +46,8 @@ async function fetchFirstOk(urls, ms = 8000) {
 // =========================================================
 // 탭 전환
 // =========================================================
-const PANES = ["fx", "etf", "muni", "cd"];
-const TITLES = { fx: "환율", etf: "ETF 시세", muni: "비과세 지방채", cd: "CD 금리" };
+const PANES = ["fx", "etf", "muni", "cd", "rates"];
+const TITLES = { fx: "환율", etf: "ETF 시세", muni: "비과세 지방채", cd: "CD 금리", rates: "미국채 금리" };
 function showTab(tab) {
   PANES.forEach(p => { $("#pane-" + p).hidden = p !== tab; });
   $$('.tabs button').forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
@@ -57,6 +57,7 @@ function showTab(tab) {
   if (tab === "etf" && !etfLoadedOnce) loadEtf();
   if (tab === "muni" && !benchLoadedFor.muni) loadMuniBench();
   if (tab === "cd" && !benchLoadedFor.cd) loadCdBench();
+  if (tab === "rates" && !benchLoadedFor.rates) loadRatesBench();
 }
 $$('.tabs button').forEach(b => b.addEventListener("click", () => showTab(b.dataset.tab)));
 
@@ -194,11 +195,16 @@ async function loadFx(force) {
 // 2) ETF 시세 (Yahoo Finance chart API, 무키 — 실패 시 대체 경로)
 // =========================================================
 const DEFAULT_ETFS = ["SPY", "QQQ", "VOO", "VTI", "DIA", "IWM", "GLD", "SCHD"];
+const INDEX_TICKERS = [{ sym: "^GSPC", label: "S&P 500" }, { sym: "^IXIC", label: "나스닥" }];
 let etfLoadedOnce = false;
 const paneEtf = $("#pane-etf");
 function etfSkeleton() {
   const syms = LS.get("etfSymbols", DEFAULT_ETFS);
   paneEtf.innerHTML = `
+    <div class="card">
+      <h2><span class="lbl">주요 지수</span></h2>
+      <div id="indexList"></div>
+    </div>
     <div class="card">
       <h2><span class="lbl">주요 미국 ETF</span></h2>
       <div id="etfList"></div>
@@ -211,9 +217,26 @@ function etfSkeleton() {
     <p class="disclaim">15~20분 지연 시세일 수 있으며 참고용입니다. 실제 체결가는 피델리티 앱에서 확인하세요.</p>
   `;
   renderEtfRows(syms, {});
+  renderIndexRows({});
   $("#etfRefresh").addEventListener("click", () => loadEtf(true));
   $("#etfAddBtn").addEventListener("click", addEtfSymbol);
   $("#etfInput").addEventListener("keydown", e => { if (e.key === "Enter") addEtfSymbol(); });
+}
+function renderIndexRows(data) {
+  const box = $("#indexList");
+  if (!box) return;
+  box.innerHTML = INDEX_TICKERS.map(({ sym, label }, i) => {
+    const d = data[sym];
+    const base = `style="grid-template-columns:1fr auto auto;${i === 0 ? "border-top:0" : ""}"`;
+    if (!d) return `<div class="etfRow" ${base}><div class="sym">${label}</div><div class="px">…</div><div></div></div>`;
+    if (d.error) return `<div class="etfRow" ${base}><div class="sym">${label}</div><div class="err">조회 실패</div><div></div></div>`;
+    const pos = d.pct >= 0;
+    return `<div class="etfRow" ${base}>
+      <div class="sym">${label}</div>
+      <div class="px">${fmt(d.price)}</div>
+      <div class="pc ${pos ? "pos" : "neg"}">${pos ? "▲" : "▼"} ${fmt(Math.abs(d.pct))}%</div>
+    </div>`;
+  }).join("");
 }
 function addEtfSymbol() {
   const inp = $("#etfInput");
@@ -272,32 +295,45 @@ async function loadEtf() {
   etfLoadedOnce = true;
   const syms = LS.get("etfSymbols", DEFAULT_ETFS);
   renderEtfRows(syms, {});
+  renderIndexRows({});
   const data = {};
-  await Promise.all(syms.map(async sym => {
-    try { data[sym] = await fetchQuote(sym); }
-    catch { data[sym] = { error: true }; }
-    renderEtfRows(syms, data);
-  }));
+  const idata = {};
+  await Promise.all([
+    ...syms.map(async sym => {
+      try { data[sym] = await fetchQuote(sym); }
+      catch { data[sym] = { error: true }; }
+      renderEtfRows(syms, data);
+    }),
+    ...INDEX_TICKERS.map(async ({ sym }) => {
+      try { idata[sym] = await fetchQuote(sym); }
+      catch { idata[sym] = { error: true }; }
+      renderIndexRows(idata);
+    })
+  ]);
   setUpdated(nowLabel() + " 업데이트");
 }
 
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
 // =========================================================
-// 3) 미국채 벤치마크 (Yahoo Finance ^IRX 13주 / ^FVX 5년) — 지방채·CD 탭 공용
+// 3) 미국채 벤치마크 (Yahoo Finance 지수: 3개월/5년/10년/30년) — 지방채·CD·금리 탭 공용
 // 브로커드 CD·지방채 개별 매물은 로그인 전용이라 전체목록을 가져올 무료 API가 없음.
 // 대신 같은 만기대의 미국채 수익률을 자동으로 가져와 "지금 사도 될 수준인지" 기준을 계산.
 // =========================================================
-const benchLoadedFor = { muni: false, cd: false };
-let bench = { irx: null, fvx: null, loadedAt: 0 };
+const BENCH_SERIES = [
+  { key: "irx", ticker: "^IRX", label: "3개월" },
+  { key: "fvx", ticker: "^FVX", label: "5년" },
+  { key: "tnx", ticker: "^TNX", label: "10년" },
+  { key: "tyx", ticker: "^TYX", label: "30년" }
+];
+const benchLoadedFor = { muni: false, cd: false, rates: false };
+let bench = { irx: null, fvx: null, tnx: null, tyx: null, loadedAt: 0 };
 async function loadBenchmark(force) {
   if (bench.loadedAt && !force && Date.now() - bench.loadedAt < 5 * 60000) return bench;
-  const [irx, fvx] = await Promise.allSettled([fetchQuote("^IRX"), fetchQuote("^FVX")]);
-  bench = {
-    irx: irx.status === "fulfilled" ? irx.value.price : null,
-    fvx: fvx.status === "fulfilled" ? fvx.value.price : null,
-    loadedAt: Date.now()
-  };
+  const results = await Promise.allSettled(BENCH_SERIES.map(s => fetchQuote(s.ticker)));
+  const next = { loadedAt: Date.now() };
+  BENCH_SERIES.forEach((s, i) => { next[s.key] = results[i].status === "fulfilled" ? results[i].value.price : null; });
+  bench = next;
   return bench;
 }
 
@@ -312,8 +348,7 @@ function muniSkeleton() {
       <h2>매수 기준선 (자동 계산)</h2>
       <div class="f"><label>비교 기준</label>
         <select id="mSrc">
-          <option value="irx">미국채 13주(단기) — <span id="mIrxVal">…</span></option>
-          <option value="fvx">미국채 5년(중기) — <span id="mFvxVal">…</span></option>
+          ${BENCH_SERIES.map(s => `<option value="${s.key}">미국채 ${s.label} — <span id="mVal_${s.key}">…</span></option>`).join("")}
           <option value="custom">직접 입력</option>
         </select>
       </div>
@@ -344,16 +379,17 @@ function muniThreshold() {
   const fed = parseFloat($("#mFed").value) || 0;
   const state = parseFloat($("#mState").value) || 0;
   const src = $("#mSrc").value;
-  const base = src === "custom" ? parseFloat($("#mCustom").value)
-    : src === "fvx" ? bench.fvx : bench.irx;
+  const base = src === "custom" ? parseFloat($("#mCustom").value) : bench[src];
   LS.set("muniCalc", { fed: $("#mFed").value, state: $("#mState").value, src, custom: $("#mCustom").value, check: $("#mCheck").value });
   if (!Number.isFinite(base)) return null;
   const combo = Math.min(0.9, (fed + state) / 100);
   return base * (1 - combo);
 }
 function calcMuni() {
-  if ($("#mIrxVal")) $("#mIrxVal").textContent = bench.irx != null ? fmt(bench.irx) + "%" : (bench.loadedAt ? "조회 실패" : "…");
-  if ($("#mFvxVal")) $("#mFvxVal").textContent = bench.fvx != null ? fmt(bench.fvx) + "%" : (bench.loadedAt ? "조회 실패" : "…");
+  BENCH_SERIES.forEach(s => {
+    const el = $("#mVal_" + s.key);
+    if (el) el.textContent = bench[s.key] != null ? fmt(bench[s.key]) + "%" : (bench.loadedAt ? "조회 실패" : "…");
+  });
   const box = $("#mResult");
   const th = muniThreshold();
   if (th == null) {
@@ -407,7 +443,7 @@ function renderCdBench() {
   }
   card.innerHTML = `
     <h2><span class="lbl">미국채 수익률 (참고 벤치마크)</span></h2>
-    <div class="etfRow" style="border-top:0"><div class="sym">13주 (단기)</div><div class="px">${bench.irx != null ? fmt(bench.irx) + "%" : "조회 실패"}</div><div></div></div>
+    <div class="etfRow" style="border-top:0"><div class="sym">3개월 (단기)</div><div class="px">${bench.irx != null ? fmt(bench.irx) + "%" : "조회 실패"}</div><div></div></div>
     <div class="etfRow"><div class="sym">5년 (중기)</div><div class="px">${bench.fvx != null ? fmt(bench.fvx) + "%" : "조회 실패"}</div><div></div></div>
   `;
 }
@@ -419,9 +455,50 @@ async function loadCdBench(force) {
 }
 
 // =========================================================
+// 6) 미국채 금리 커브: 3개월~30년 수익률을 한눈에 (지수 자동표시도 ETF 탭 상단에 추가)
+// =========================================================
+const paneRates = $("#pane-rates");
+function ratesSkeleton() {
+  paneRates.innerHTML = `
+    <div class="card" id="ratesCard"><h2><span class="lbl">미국채 금리 커브</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="row"><button class="btn sm" id="ratesRefresh">새로고침</button></div>
+    <p class="disclaim">Yahoo Finance의 미국채 지수(3개월물·5년물·10년물·30년물)를 그대로 보여줍니다. 보통 단기보다 장기 금리가 높으면 정상적인 커브, 반대면 "역전"된 상태로 봅니다.</p>
+  `;
+  $("#ratesRefresh").addEventListener("click", () => loadRatesBench(true));
+}
+function renderRatesBench() {
+  const card = $("#ratesCard");
+  if (!card) return;
+  const vals = BENCH_SERIES.map(s => bench[s.key]).filter(v => v != null);
+  if (!vals.length) {
+    card.innerHTML = `<h2><span class="lbl">미국채 금리 커브</span></h2><div class="status err">조회 실패. 네트워크를 확인하고 새로고침 해주세요.</div>`;
+    return;
+  }
+  const max = Math.max(...vals);
+  card.innerHTML = `
+    <h2><span class="lbl">미국채 금리 커브</span></h2>
+    ${BENCH_SERIES.map(s => {
+      const v = bench[s.key];
+      const pct = v != null ? Math.max(4, (v / max) * 100) : 0;
+      return `<div class="curveRow">
+        <div class="lbl">${s.label}</div>
+        <div class="curveBar">${v != null ? `<i style="width:${pct}%"></i>` : ""}</div>
+        <div class="val">${v != null ? fmt(v) + "%" : "실패"}</div>
+      </div>`;
+    }).join("")}
+  `;
+}
+async function loadRatesBench(force) {
+  benchLoadedFor.rates = true;
+  try { await loadBenchmark(force); } catch {}
+  renderRatesBench();
+  setUpdated(nowLabel() + " 업데이트");
+}
+
+// =========================================================
 // 초기화
 // =========================================================
-fxSkeleton(); etfSkeleton(); muniSkeleton(); cdSkeleton();
+fxSkeleton(); etfSkeleton(); muniSkeleton(); cdSkeleton(); ratesSkeleton();
 showTab(LS.get("lastTab", "fx"));
 
 if ("serviceWorker" in navigator) {

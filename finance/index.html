@@ -74,6 +74,12 @@ section.pane{display:flex;flex-direction:column;gap:14px}
 .chartMeta{display:flex;justify-content:space-between;gap:8px;font-size:12px;color:var(--muted);margin-top:14px}
 .chartMeta .pos{color:var(--up)}.chartMeta .neg{color:var(--down)}
 .chartDates{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:2px}
+.curveRow{display:grid;grid-template-columns:56px 1fr 56px;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
+.curveRow:first-of-type{border-top:0}
+.curveRow .lbl{font-size:13px;color:var(--muted)}
+.curveRow .val{font-family:var(--font-mono);font-weight:600;text-align:right;font-size:14px}
+.curveBar{height:8px;border-radius:4px;background:var(--accent-soft);overflow:hidden}
+.curveBar i{display:block;height:100%;background:var(--accent);border-radius:4px}
 
 .etfRow{display:grid;grid-template-columns:1fr auto auto;gap:4px 10px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
 .etfRow:first-child{border-top:0}
@@ -122,7 +128,7 @@ table.logtbl td.del{text-align:right}
 .status.err{color:var(--danger)}
 
 nav.tabs{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--surface);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom,0px)}
-nav.tabs .inner{max-width:640px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr 1fr 1fr}
+nav.tabs .inner{max-width:640px;margin:0 auto;display:grid;grid-template-columns:repeat(5,1fr)}
 nav.tabs button{background:none;border:0;display:flex;flex-direction:column;align-items:center;gap:3px;padding:9px 2px 8px;color:var(--muted);font-size:11.5px;font-weight:600}
 nav.tabs button svg{width:21px;height:21px}
 nav.tabs button[aria-selected="true"]{color:var(--accent)}
@@ -142,6 +148,7 @@ nav.tabs button[aria-selected="true"]{color:var(--accent)}
     <section class="pane" id="pane-etf" hidden></section>
     <section class="pane" id="pane-muni" hidden></section>
     <section class="pane" id="pane-cd" hidden></section>
+    <section class="pane" id="pane-rates" hidden></section>
   </main>
 </div>
 <nav class="tabs" role="tablist" aria-label="섹션">
@@ -161,6 +168,10 @@ nav.tabs button[aria-selected="true"]{color:var(--accent)}
     <button role="tab" data-tab="cd" aria-selected="false">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9 9.5c0-1 1.3-1.8 3-1.8s3 .8 3 1.8-1.3 1.6-3 1.8c-1.7.2-3 .8-3 1.9s1.3 1.8 3 1.8 3-.7 3-1.8"/></svg>
       CD
+    </button>
+    <button role="tab" data-tab="rates" aria-selected="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19h16M7 19V9M12 19V5M17 19v13"/></svg>
+      금리
     </button>
   </div>
 </nav>
