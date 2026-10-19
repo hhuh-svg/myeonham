@@ -274,7 +274,7 @@ function muniSkeleton() {
         <div class="f"><label>주(State) 소득세율 (%)</label><input id="mState" type="number" step="1" inputmode="decimal" value="${c.state}"></div>
       </div>
       <div class="resultBox" id="mResult"><div class="small">수익률을 입력하세요</div></div>
-      <p class="note">해당 주 발행 지방채는 연방+주 세금이 모두 면제(double tax-exempt)되는 경우가 많습니다. 주 세율은 "본인 거주주에서 발행한 지방채"에만 적용하세요. AMT 대상 채권·NIIT 등은 반영하지 않은 단순 참고치입니다. 투자 조언이 아닙니다.</p>
+      <p class="note">텍사스(TX)처럼 주소득세가 없는 주는 주 세율을 0으로 두면 됩니다 — 이 경우 지방채 발행 주와 무관하게 연방세만 비교하면 됩니다. 주소득세가 있는 주로 이사하면 "거주 주에서 발행한 지방채"에 한해 주 세율도 입력하세요. AMT 대상 채권·NIIT 등은 반영하지 않은 단순 참고치입니다. 투자 조언이 아닙니다.</p>
     </div>
     <div class="card">
       <h2>내가 본 지방채 기록</h2>
@@ -287,9 +287,14 @@ function muniSkeleton() {
           <input id="mfMat" placeholder="만기 (예: 2034)">
         </div>
         <div class="two">
-          <input id="mfYield" type="number" step="0.01" placeholder="수익률(%)">
-          <button class="btn sm primary" id="mfSave">저장</button>
+          <input id="mfCusip" placeholder="CUSIP (선택)" maxlength="9" style="text-transform:uppercase">
+          <input id="mfQty" type="number" step="1" placeholder="매수가능수량 (선택)">
         </div>
+        <div class="two">
+          <input id="mfMin" type="number" step="1" placeholder="최소투자금액 $ (선택)">
+          <input id="mfYield" type="number" step="0.01" placeholder="수익률(%)">
+        </div>
+        <button class="btn sm primary" id="mfSave">저장</button>
       </div>
     </div>
   `;
@@ -321,14 +326,27 @@ function saveMuniLog() {
   const name = $("#mfName").value.trim();
   const y = parseFloat($("#mfYield").value);
   if (!name || !isFinite(y)) { toast("종목명과 수익률을 입력하세요"); return; }
+  const qty = parseFloat($("#mfQty").value);
+  const min = parseFloat($("#mfMin").value);
   const list = loadMuniLog();
-  list.push({ id: uid(), name, state: $("#mfState").value.trim().toUpperCase(), mat: $("#mfMat").value.trim(), yield: y, date: new Date().toISOString().slice(0, 10) });
+  list.push({
+    id: uid(), name, state: $("#mfState").value.trim().toUpperCase(), mat: $("#mfMat").value.trim(),
+    cusip: $("#mfCusip").value.trim().toUpperCase(), qty: isFinite(qty) ? qty : null, min: isFinite(min) ? min : null,
+    yield: y, date: new Date().toISOString().slice(0, 10)
+  });
   LS.set("muniLog", list);
-  $("#mfName").value = ""; $("#mfState").value = ""; $("#mfMat").value = ""; $("#mfYield").value = "";
+  ["mfName", "mfState", "mfMat", "mfCusip", "mfQty", "mfMin", "mfYield"].forEach(id => $("#" + id).value = "");
   $("#muniForm").classList.remove("open");
   renderMuniLog();
 }
 function deleteMuniLog(id) { LS.set("muniLog", loadMuniLog().filter(x => x.id !== id)); renderMuniLog(); }
+function logSubline(r) {
+  const parts = [];
+  if (r.cusip) parts.push("CUSIP " + escapeHtml(r.cusip));
+  if (r.min != null) parts.push("최소 $" + fmtInt(r.min));
+  if (r.qty != null) parts.push("매수가능 " + fmtInt(r.qty));
+  return parts.length ? `<div class="small" style="margin-top:2px">${parts.join(" · ")}</div>` : "";
+}
 function renderMuniLog() {
   const box = $("#muniLogBox");
   if (!box) return;
@@ -336,7 +354,7 @@ function renderMuniLog() {
   if (!list.length) { box.innerHTML = `<div class="empty2">기록된 지방채가 없습니다</div>`; return; }
   box.innerHTML = `<table class="logtbl"><thead><tr><th>종목</th><th>주</th><th>만기</th><th>수익률</th><th></th></tr></thead><tbody>
     ${list.map((r, i) => `<tr class="${i === 0 ? "top" : ""}">
-      <td class="name">${escapeHtml(r.name)}</td><td>${escapeHtml(r.state || "-")}</td><td>${escapeHtml(r.mat || "-")}</td>
+      <td class="name">${escapeHtml(r.name)}${logSubline(r)}</td><td>${escapeHtml(r.state || "-")}</td><td>${escapeHtml(r.mat || "-")}</td>
       <td>${fmt(r.yield)}%</td><td class="del"><button class="delbtn" data-del="${r.id}">삭제</button></td>
     </tr>`).join("")}
   </tbody></table>`;
@@ -365,9 +383,16 @@ function cdSkeleton() {
         <input id="cfIssuer" placeholder="발행은행">
         <div class="two">
           <input id="cfTerm" placeholder="기간 (예: 1년)">
-          <input id="cfApy" type="number" step="0.01" placeholder="APY(%)">
+          <input id="cfCusip" placeholder="CUSIP (선택)" maxlength="9" style="text-transform:uppercase">
         </div>
-        <button class="btn sm primary" id="cfSave">저장</button>
+        <div class="two">
+          <input id="cfQty" type="number" step="1" placeholder="매수가능수량 (선택)">
+          <input id="cfMin" type="number" step="1" placeholder="최소투자금액 $ (선택)">
+        </div>
+        <div class="two">
+          <input id="cfApy" type="number" step="0.01" placeholder="APY(%)">
+          <button class="btn sm primary" id="cfSave">저장</button>
+        </div>
       </div>
     </div>
   `;
@@ -380,10 +405,16 @@ function saveCdLog() {
   const issuer = $("#cfIssuer").value.trim();
   const apy = parseFloat($("#cfApy").value);
   if (!issuer || !isFinite(apy)) { toast("은행명과 APY를 입력하세요"); return; }
+  const qty = parseFloat($("#cfQty").value);
+  const min = parseFloat($("#cfMin").value);
   const list = loadCdLog();
-  list.push({ id: uid(), issuer, term: $("#cfTerm").value.trim() || "-", apy, date: new Date().toISOString().slice(0, 10) });
+  list.push({
+    id: uid(), issuer, term: $("#cfTerm").value.trim() || "-",
+    cusip: $("#cfCusip").value.trim().toUpperCase(), qty: isFinite(qty) ? qty : null, min: isFinite(min) ? min : null,
+    apy, date: new Date().toISOString().slice(0, 10)
+  });
   LS.set("cdLog", list);
-  $("#cfIssuer").value = ""; $("#cfTerm").value = ""; $("#cfApy").value = "";
+  ["cfIssuer", "cfTerm", "cfCusip", "cfQty", "cfMin", "cfApy"].forEach(id => $("#" + id).value = "");
   $("#cdForm").classList.remove("open");
   renderCdLog();
 }
@@ -395,7 +426,7 @@ function renderCdLog() {
   if (!list.length) { box.innerHTML = `<div class="empty2">기록된 CD 금리가 없습니다</div>`; return; }
   box.innerHTML = `<table class="logtbl"><thead><tr><th>은행</th><th>기간</th><th>APY</th><th>날짜</th><th></th></tr></thead><tbody>
     ${list.map((r, i) => `<tr class="${i === 0 ? "top" : ""}">
-      <td class="name">${escapeHtml(r.issuer)}</td><td>${escapeHtml(r.term)}</td><td>${fmt(r.apy)}%</td><td>${r.date}</td>
+      <td class="name">${escapeHtml(r.issuer)}${logSubline(r)}</td><td>${escapeHtml(r.term)}</td><td>${fmt(r.apy)}%</td><td>${r.date}</td>
       <td class="del"><button class="delbtn" data-del="${r.id}">삭제</button></td>
     </tr>`).join("")}
   </tbody></table>`;
