@@ -209,7 +209,17 @@ async function loadFx(force) {
 // =========================================================
 // 2) ETF 시세 (Yahoo Finance chart API, 무키 — 실패 시 대체 경로)
 // =========================================================
-const DEFAULT_ETFS = ["SPY", "QQQ", "VOO", "VTI", "DIA", "IWM", "GLD", "SCHD"];
+const DEFAULT_ETFS = [
+  "BST", "GLDM", "GOOGL", "IAU", "LLY", "MGK", "MSFT", "NVDA", "QQQ", "QQQM",
+  "SCHP", "SGOV", "SMH", "SUB", "TSLA", "VOO", "VTES", "VXUS",
+  "ARKG", "BOTZ", "CQQQ", "IXN", "MCHI", "SIVR", "SPCX", "XOVR"
+];
+// 기본 종목 목록을 실제 보유 종목으로 교체(2026-10-19) — 이미 저장된 사용자 데이터를 한 번만 덮어씀
+const ETF_DEFAULTS_VERSION = 2;
+if (LS.get("etfDefaultsVersion", 1) !== ETF_DEFAULTS_VERSION) {
+  LS.set("etfSymbols", DEFAULT_ETFS);
+  LS.set("etfDefaultsVersion", ETF_DEFAULTS_VERSION);
+}
 const INDEX_TICKERS = [{ sym: "^GSPC", label: "S&P 500" }, { sym: "^IXIC", label: "나스닥" }];
 let etfLoadedOnce = false;
 const paneEtf = $("#pane-etf");
