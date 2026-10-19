@@ -42,12 +42,26 @@ async function fetchFirstOk(urls, ms = 8000) {
   }
   throw lastErr || new Error("모든 소스 실패");
 }
+function fetchText(url, ms = 8000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { signal: ctrl.signal, cache: "no-store" })
+    .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); })
+    .finally(() => clearTimeout(t));
+}
+async function fetchFirstOkText(urls, ms = 8000) {
+  let lastErr;
+  for (const u of urls) {
+    try { return await fetchText(u, ms); } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error("모든 소스 실패");
+}
 
 // =========================================================
 // 탭 전환
 // =========================================================
-const PANES = ["fx", "etf", "muni", "cd", "rates"];
-const TITLES = { fx: "환율", etf: "ETF 시세", muni: "비과세 지방채", cd: "CD 금리", rates: "미국채 금리" };
+const PANES = ["fx", "etf", "muni", "cd", "news"];
+const TITLES = { fx: "환율", etf: "ETF 시세", muni: "비과세 지방채", cd: "CD 금리", news: "뉴스" };
 function showTab(tab) {
   PANES.forEach(p => { $("#pane-" + p).hidden = p !== tab; });
   $$('.tabs button').forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
@@ -57,7 +71,8 @@ function showTab(tab) {
   if (tab === "etf" && !etfLoadedOnce) loadEtf();
   if (tab === "muni" && !benchLoadedFor.muni) loadMuniBench();
   if (tab === "cd" && !benchLoadedFor.cd) loadCdBench();
-  if (tab === "rates" && !benchLoadedFor.rates) loadRatesBench();
+  if (tab === "cd" && !cdRatesLoadedOnce) loadCdRates();
+  if (tab === "news" && !newsLoadedOnce) loadNews();
 }
 $$('.tabs button').forEach(b => b.addEventListener("click", () => showTab(b.dataset.tab)));
 
@@ -279,24 +294,44 @@ function removeEtfSymbol(sym) {
   LS.set("etfSymbols", syms);
   loadEtf(true);
 }
+function getEtfQty(sym) { return (LS.get("etfQty", {}) || {})[sym] || ""; }
+function setEtfQty(sym, val) {
+  const q = LS.get("etfQty", {}) || {};
+  const n = parseFloat(val);
+  if (val === "" || !isFinite(n)) delete q[sym]; else q[sym] = n;
+  LS.set("etfQty", q);
+}
 function renderEtfRows(syms, data) {
   const box = $("#etfList");
   if (!box) return;
   box.innerHTML = syms.map(sym => {
     const s = escapeHtml(sym);
     const d = data[sym];
-    if (!d) return `<div class="etfRow" data-sym="${s}"><div class="sym">${s}</div><div class="px">…</div><div></div></div>`;
-    if (d.error) return `<div class="etfRow" data-sym="${s}"><div class="sym">${s}</div><div class="err">조회 실패</div><button class="delbtn" data-del="${s}">삭제</button></div>`;
+    const qty = getEtfQty(sym);
+    const qtyRow = `<div class="qtyRow"><input class="qtyInput" data-qty="${s}" type="number" step="any" inputmode="decimal" placeholder="보유수량" value="${qty}"></div>`;
+    if (!d) return `<div class="etfRow" data-sym="${s}"><div class="sym">${s}</div><div class="px">…</div><div></div>${qtyRow}</div>`;
+    if (d.error) return `<div class="etfRow" data-sym="${s}"><div class="sym">${s}</div><div class="err">조회 실패</div><button class="delbtn" data-del="${s}">삭제</button>${qtyRow}</div>`;
     const pos = d.pct >= 0;
+    const parts = [];
+    if (qty) parts.push(`평가액 $${fmtInt(qty * d.price)}`);
+    if (d.div && d.div.yield != null) parts.push(`배당 ${fmt(d.div.yield)}%${d.div.rate != null ? ` ($${fmt(d.div.rate)}/주)` : ""}`);
+    if (qty && d.div && d.div.rate != null) parts.push(`연배당 예상 $${fmtInt(qty * d.div.rate)}`);
     return `<div class="etfRow" data-sym="${s}">
       <div class="sym">${s}<button class="delbtn" data-del="${s}" style="margin-left:6px">삭제</button></div>
       <div class="px">$${fmt(d.price)}</div>
       <div class="pc ${pos ? "pos" : "neg"}">${pos ? "▲" : "▼"} ${fmt(Math.abs(d.pct))}%</div>
       <div class="nm">${escapeHtml(d.name || "")}</div>
+      ${parts.length ? `<div class="nm" style="color:var(--accent)">${parts.join(" · ")}</div>` : ""}
+      ${qtyRow}
     </div>`;
   }).join("");
   $$("[data-del]", box).forEach(b => b.addEventListener("click", () => removeEtfSymbol(b.dataset.del)));
+  $$("[data-qty]", box).forEach(inp => inp.addEventListener("change", () => {
+    setEtfQty(inp.dataset.qty, inp.value);
+    renderEtfRows(LS.get("etfSymbols", DEFAULT_ETFS), lastEtfData);
+  }));
 }
+let lastEtfData = {};
 function yahooUrls(symbol) {
   const target = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
   const target2 = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
@@ -316,6 +351,20 @@ async function fetchQuote(symbol) {
   if (price == null || prev == null) throw new Error("no price");
   return { price, pct: ((price - prev) / prev) * 100, name: r.meta.longName || r.meta.shortName || "" };
 }
+function quoteSummaryUrls(symbol) {
+  const target = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=summaryDetail`;
+  const target2 = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=summaryDetail`;
+  return [target, target2, `https://corsproxy.io/?url=${encodeURIComponent(target)}`, `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`];
+}
+async function fetchDividend(symbol) {
+  const json = await fetchFirstOk(quoteSummaryUrls(symbol), 7000);
+  const sd = json && json.quoteSummary && json.quoteSummary.result && json.quoteSummary.result[0] && json.quoteSummary.result[0].summaryDetail;
+  if (!sd) throw new Error("no dividend data");
+  const y = sd.dividendYield && sd.dividendYield.raw;
+  const r = sd.dividendRate && sd.dividendRate.raw;
+  if (y == null && r == null) throw new Error("no dividend");
+  return { yield: y != null ? y * 100 : null, rate: r != null ? r : null };
+}
 async function loadEtf() {
   etfLoadedOnce = true;
   const syms = LS.get("etfSymbols", DEFAULT_ETFS);
@@ -323,11 +372,13 @@ async function loadEtf() {
   renderIndexRows({});
   const data = {};
   const idata = {};
+  lastEtfData = data;
   await Promise.all([
     ...syms.map(async sym => {
       try { data[sym] = await fetchQuote(sym); }
-      catch { data[sym] = { error: true }; }
+      catch { data[sym] = { error: true }; renderEtfRows(syms, data); return; }
       renderEtfRows(syms, data);
+      try { data[sym].div = await fetchDividend(sym); renderEtfRows(syms, data); } catch {}
     }),
     ...INDEX_TICKERS.map(async ({ sym }) => {
       try { idata[sym] = await fetchQuote(sym); }
@@ -351,7 +402,7 @@ const BENCH_SERIES = [
   { key: "tnx", ticker: "^TNX", label: "10년" },
   { key: "tyx", ticker: "^TYX", label: "30년" }
 ];
-const benchLoadedFor = { muni: false, cd: false, rates: false };
+const benchLoadedFor = { muni: false, cd: false };
 let bench = { irx: null, fvx: null, tnx: null, tyx: null, loadedAt: 0 };
 async function loadBenchmark(force) {
   if (bench.loadedAt && !force && Date.now() - bench.loadedAt < 5 * 60000) return bench;
@@ -453,11 +504,12 @@ async function loadMuniBench(force) {
 const paneCd = $("#pane-cd");
 function cdSkeleton() {
   paneCd.innerHTML = `
+    <div class="card" id="cdRatesCard"><h2><span class="lbl">피델리티 CD 금리 (실시간 시도)</span></h2><div class="status">불러오는 중…</div></div>
     <div class="card" id="cdBenchCard"><h2><span class="lbl">미국채 수익률 (참고 벤치마크)</span></h2><div class="status">불러오는 중…</div></div>
     <div class="row"><button class="btn sm" id="cdRefresh">새로고침</button></div>
-    <p class="disclaim">브로커드 CD는 발행사·물량에 따라 보통 같은 만기 미국채보다 0.1~0.3%p 정도 높게 나오는 경우가 많습니다(시장 상황에 따라 다를 수 있음). 개별 금리 "최고가"는 로그인 전용이라 이 앱이 직접 가져올 순 없습니다 — <a href="https://www.fidelity.com/fixed-income-bonds/cds/new-issue-cds" target="_blank" rel="noopener">피델리티에서 찾기 ↗</a></p>
+    <p class="disclaim">브로커드 CD는 발행사·물량에 따라 보통 같은 만기 미국채보다 0.1~0.3%p 정도 높게 나오는 경우가 많습니다(시장 상황에 따라 다를 수 있음). 정확한 최신 금리는 <a href="https://www.fidelity.com/fixed-income-bonds/cds/new-issue-cds" target="_blank" rel="noopener">피델리티에서 직접 확인 ↗</a></p>
   `;
-  $("#cdRefresh").addEventListener("click", () => loadCdBench(true));
+  $("#cdRefresh").addEventListener("click", () => { loadCdBench(true); loadCdRates(true); });
 }
 function renderCdBench() {
   const card = $("#cdBenchCard");
@@ -478,52 +530,126 @@ async function loadCdBench(force) {
   renderCdBench();
   setUpdated(nowLabel() + " 업데이트");
 }
+// 피델리티 공개 CD 페이지에서 금리표를 직접 긁어오는 시도. 로그인 없이 보이는 화면이 JS로
+// 렌더링되는 경우(흔함) 원문 HTML에는 숫자가 없어서 실패할 수 있음 — 그럴 땐 벤치마크로 대체.
+async function fetchFidelityCdRates() {
+  const target = "https://www.fidelity.com/fixed-income-bonds/cds/new-issue-cds";
+  const urls = [
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`,
+    `https://corsproxy.io/?url=${encodeURIComponent(target)}`
+  ];
+  const html = await fetchFirstOkText(urls, 9000);
+  const text = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ");
+  const re = /(\d{1,2})\s*[-]?\s*(Month|Months|Year|Years|Mo|Yr)s?\b[^%\d]{0,40}?(\d{1,2}\.\d{1,3})\s*%/gi;
+  const found = [];
+  const seen = new Set();
+  let m;
+  while ((m = re.exec(text)) && found.length < 12) {
+    const key = m[1] + m[2][0].toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    found.push({ term: `${m[1]} ${m[2]}`, apy: parseFloat(m[3]) });
+  }
+  if (!found.length) throw new Error("금리표를 찾지 못함 (페이지가 자바스크립트로 그려지는 경우일 수 있음)");
+  return found;
+}
+let cdRatesLoadedOnce = false;
+async function loadCdRates(force) {
+  if (cdRatesLoadedOnce && !force) return;
+  cdRatesLoadedOnce = true;
+  const card = $("#cdRatesCard");
+  card.innerHTML = `<h2><span class="lbl">피델리티 CD 금리 (실시간 시도)</span></h2><div class="status">불러오는 중…</div>`;
+  try {
+    const rates = await fetchFidelityCdRates();
+    rates.sort((a, b) => b.apy - a.apy);
+    card.innerHTML = `
+      <h2><span class="lbl">피델리티 CD 금리 (실시간 시도)</span></h2>
+      ${rates.map((r, i) => `<div class="etfRow" style="grid-template-columns:1fr auto auto;${i === 0 ? "border-top:0" : ""}"><div class="sym">${escapeHtml(r.term)}</div><div class="px">${fmt(r.apy)}%</div><div></div></div>`).join("")}
+      <p class="note">피델리티 공개 페이지를 그대로 긁어온 값이라 표시 오류가 있을 수 있어요. 실제 매수 전엔 꼭 피델리티 앱에서 재확인하세요.</p>
+    `;
+  } catch (e) {
+    card.innerHTML = `
+      <h2><span class="lbl">피델리티 CD 금리 (실시간 시도)</span></h2>
+      <div class="status err">자동으로 가져오지 못했습니다.</div>
+      <div class="small" style="margin-top:4px;word-break:break-all">사유: ${escapeHtml(e.message)}</div>
+      <p class="note">아래 미국채 벤치마크를 참고하거나, 피델리티에서 직접 확인해주세요.</p>
+    `;
+  }
+}
 
 // =========================================================
-// 6) 미국채 금리 커브: 3개월~30년 수익률을 한눈에 (지수 자동표시도 ETF 탭 상단에 추가)
+// 6) 주요 뉴스 피드 (RSS, CORS 프록시 경유)
 // =========================================================
-const paneRates = $("#pane-rates");
-function ratesSkeleton() {
-  paneRates.innerHTML = `
-    <div class="card" id="ratesCard"><h2><span class="lbl">미국채 금리 커브</span></h2><div class="status">불러오는 중…</div></div>
-    <div class="row"><button class="btn sm" id="ratesRefresh">새로고침</button></div>
-    <p class="disclaim">Yahoo Finance의 미국채 지수(3개월물·5년물·10년물·30년물)를 그대로 보여줍니다. 보통 단기보다 장기 금리가 높으면 정상적인 커브, 반대면 "역전"된 상태로 봅니다.</p>
+const NEWS_FEEDS = [
+  { name: "CNBC", url: "https://www.cnbc.com/id/100003114/device/rss/rss.html" },
+  { name: "MarketWatch", url: "https://feeds.marketwatch.com/marketwatch/topstories/" },
+  { name: "Yahoo Finance", url: "https://finance.yahoo.com/news/rssindex" }
+];
+const paneNews = $("#pane-news");
+function newsSkeleton() {
+  paneNews.innerHTML = `
+    <div class="card"><h2><span class="lbl">주요 경제·시장 뉴스</span></h2><div id="newsList"><div class="status">불러오는 중…</div></div></div>
+    <div class="row"><button class="btn sm" id="newsRefresh">새로고침</button></div>
+    <p class="disclaim">CNBC·MarketWatch·Yahoo Finance의 공개 RSS 피드를 모아 최신순으로 보여줍니다. 기사를 누르면 해당 언론사 사이트로 이동합니다.</p>
   `;
-  $("#ratesRefresh").addEventListener("click", () => loadRatesBench(true));
+  $("#newsRefresh").addEventListener("click", () => loadNews(true));
 }
-function renderRatesBench() {
-  const card = $("#ratesCard");
-  if (!card) return;
-  const vals = BENCH_SERIES.map(s => bench[s.key]).filter(v => v != null);
-  if (!vals.length) {
-    card.innerHTML = `<h2><span class="lbl">미국채 금리 커브</span></h2><div class="status err">조회 실패. 네트워크를 확인하고 새로고침 해주세요.</div>`;
+async function fetchFeed(url, ms = 8000) {
+  const urls = [url, `https://corsproxy.io/?url=${encodeURIComponent(url)}`, `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`];
+  const xml = await fetchFirstOkText(urls, ms);
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  if (doc.querySelector("parsererror")) throw new Error("feed parse error");
+  return doc;
+}
+function parseRssItems(doc, sourceName, limit = 10) {
+  return Array.from(doc.querySelectorAll("item")).slice(0, limit).map(item => ({
+    title: (item.querySelector("title")?.textContent || "").trim(),
+    link: (item.querySelector("link")?.textContent || "#").trim(),
+    pubDate: (item.querySelector("pubDate")?.textContent || "").trim(),
+    source: sourceName
+  })).filter(it => it.title);
+}
+function timeAgo(pubDateStr) {
+  const d = new Date(pubDateStr);
+  if (isNaN(d)) return "";
+  const diffMin = Math.round((Date.now() - d.getTime()) / 60000);
+  if (diffMin < 1) return "방금 전";
+  if (diffMin < 60) return diffMin + "분 전";
+  const diffH = Math.round(diffMin / 60);
+  if (diffH < 24) return diffH + "시간 전";
+  return Math.round(diffH / 24) + "일 전";
+}
+let newsLoadedOnce = false;
+async function loadNews(force) {
+  if (newsLoadedOnce && !force) return;
+  newsLoadedOnce = true;
+  const box = $("#newsList");
+  box.innerHTML = `<div class="status">불러오는 중…</div>`;
+  const results = await Promise.allSettled(NEWS_FEEDS.map(f => fetchFeed(f.url).then(doc => parseRssItems(doc, f.name))));
+  let items = [];
+  const errs = [];
+  results.forEach((r, i) => {
+    if (r.status === "fulfilled") items = items.concat(r.value);
+    else errs.push(NEWS_FEEDS[i].name + ": " + r.reason.message);
+  });
+  if (!items.length) {
+    box.innerHTML = `<div class="status err">뉴스를 가져오지 못했습니다. 새로고침 해주세요.</div><div class="small" style="margin-top:6px;word-break:break-all">${escapeHtml(errs.join(" / "))}</div>`;
     return;
   }
-  const max = Math.max(...vals);
-  card.innerHTML = `
-    <h2><span class="lbl">미국채 금리 커브</span></h2>
-    ${BENCH_SERIES.map(s => {
-      const v = bench[s.key];
-      const pct = v != null ? Math.max(4, (v / max) * 100) : 0;
-      return `<div class="curveRow">
-        <div class="lbl">${s.label}</div>
-        <div class="curveBar">${v != null ? `<i style="width:${pct}%"></i>` : ""}</div>
-        <div class="val">${v != null ? fmt(v) + "%" : "실패"}</div>
-      </div>`;
-    }).join("")}
-  `;
-}
-async function loadRatesBench(force) {
-  benchLoadedFor.rates = true;
-  try { await loadBenchmark(force); } catch {}
-  renderRatesBench();
+  items.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
+  box.innerHTML = items.slice(0, 25).map(it => `
+    <a class="newsRow" href="${escapeHtml(it.link)}" target="_blank" rel="noopener">
+      <div class="newsTitle">${escapeHtml(it.title)}</div>
+      <div class="newsMeta">${escapeHtml(it.source)} · ${timeAgo(it.pubDate)}</div>
+    </a>
+  `).join("");
   setUpdated(nowLabel() + " 업데이트");
 }
 
 // =========================================================
 // 초기화
 // =========================================================
-fxSkeleton(); etfSkeleton(); muniSkeleton(); cdSkeleton(); ratesSkeleton();
+fxSkeleton(); etfSkeleton(); muniSkeleton(); cdSkeleton(); newsSkeleton();
 showTab(LS.get("lastTab", "fx"));
 
 if ("serviceWorker" in navigator) {
