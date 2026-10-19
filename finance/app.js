@@ -133,6 +133,7 @@ async function loadFx(force) {
     const back = new Date(today.getTime() - FX_PERIOD_DAYS[fxPeriod] * 86400000);
     const iso = d => d.toISOString().slice(0, 10);
     let rate = null, days = [], history = [], prevRate = null;
+    const errs = [];
     try {
       const series = await fetchJSON(`https://api.frankfurter.app/${iso(back)}..${iso(today)}?from=USD&to=KRW`);
       days = Object.keys(series.rates || {}).sort();
@@ -141,26 +142,26 @@ async function loadFx(force) {
         rate = history[history.length - 1];
         prevRate = history.length > 1 ? history[history.length - 2] : null;
       }
-    } catch {}
+    } catch (e) { errs.push("frankfurter(기간): " + e.message); }
     if (rate == null) {
       try {
         const cur = await fetchJSON(`https://api.frankfurter.app/latest?from=USD&to=KRW`);
         rate = cur.rates && cur.rates.KRW;
-      } catch {}
+      } catch (e) { errs.push("frankfurter(현재): " + e.message); }
     }
     if (rate == null) {
       try {
         const alt = await fetchJSON(`https://open.er-api.com/v6/latest/USD`);
         rate = alt.rates && alt.rates.KRW;
-      } catch {}
+      } catch (e) { errs.push("open.er-api: " + e.message); }
     }
     if (rate == null) {
       try {
         const alt2 = await fetchJSON(`https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json`);
         rate = alt2.usd && alt2.usd.krw;
-      } catch {}
+      } catch (e) { errs.push("jsdelivr: " + e.message); }
     }
-    if (rate == null) throw new Error("환율 조회 실패");
+    if (rate == null) { const err = new Error("환율 조회 실패"); err.detail = errs.join(" / "); throw err; }
     fxRate = rate;
     const chg = prevRate != null ? rate - prevRate : null;
     const chgPct = prevRate != null ? (chg / prevRate) * 100 : null;
@@ -196,7 +197,11 @@ async function loadFx(force) {
     convertFrom("usd"); convertFrom("krw");
     setUpdated(nowLabel() + " 업데이트");
   } catch (e) {
-    card.innerHTML = `<h2><span class="lbl">USD → KRW</span></h2><div class="status err">환율 조회 실패. 네트워크를 확인하고 새로고침 해주세요.</div>`;
+    card.innerHTML = `
+      <h2><span class="lbl">USD → KRW</span></h2>
+      <div class="status err">환율 조회 실패. 네트워크를 확인하고 새로고침 해주세요.</div>
+      ${e.detail ? `<div class="small" style="margin-top:8px;word-break:break-all">실패 원인: ${escapeHtml(e.detail)}</div>` : ""}
+    `;
     toast("환율 조회 실패");
   }
 }
