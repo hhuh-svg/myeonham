@@ -74,7 +74,7 @@ function fxSkeleton() {
     <div class="card">
       <h2>환전 계산기</h2>
       <div class="conv">
-        <span>$</span><input id="convUsd" type="number" inputmode="decimal" placeholder="100" step="0.01">
+        <span>$</span><input id="convUsd" type="number" inputmode="decimal" placeholder="100" step="0.01" value="1">
         <span class="eq">=</span>
         <span class="res" id="convKrwOut">₩ -</span>
       </div>
