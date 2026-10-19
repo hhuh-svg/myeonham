@@ -262,7 +262,7 @@ function etfSkeleton() {
       </div>
     </div>
     <div class="row"><button class="btn sm" id="etfRefresh">새로고침</button></div>
-    <p class="disclaim">15~20분 지연 시세일 수 있으며 참고용입니다. 실제 체결가는 피델리티 앱에서 확인하세요.</p>
+    <p class="disclaim">15~20분 지연 시세일 수 있으며 참고용입니다. 실제 체결가는 피델리티 앱에서 확인하세요. 보유수량·매수단가를 입력하면 평가액·누적손익이 자동 계산되고, 배당수익률·최근 배당지급 내역도 함께 보여드립니다.</p>
   `;
   renderEtfRows(syms, {});
   renderIndexRows({});
@@ -309,6 +309,13 @@ function setEtfQty(sym, val) {
   if (val === "" || !isFinite(n)) delete q[sym]; else q[sym] = n;
   LS.set("etfQty", q);
 }
+function getEtfCost(sym) { return (LS.get("etfCost", {}) || {})[sym] || ""; }
+function setEtfCost(sym, val) {
+  const c = LS.get("etfCost", {}) || {};
+  const n = parseFloat(val);
+  if (val === "" || !isFinite(n)) delete c[sym]; else c[sym] = n;
+  LS.set("etfCost", c);
+}
 function renderEtfRows(syms, data) {
   const box = $("#etfList");
   if (!box) return;
@@ -316,14 +323,24 @@ function renderEtfRows(syms, data) {
     const s = escapeHtml(sym);
     const d = data[sym];
     const qty = getEtfQty(sym);
-    const qtyRow = `<div class="qtyRow"><input class="qtyInput" data-qty="${s}" type="number" step="any" inputmode="decimal" placeholder="보유수량" value="${qty}"></div>`;
+    const cost = getEtfCost(sym);
+    const qtyRow = `<div class="qtyRow">
+      <input class="qtyInput" data-qty="${s}" type="number" step="any" inputmode="decimal" placeholder="보유수량" value="${qty}">
+      <input class="qtyInput" data-cost="${s}" type="number" step="any" inputmode="decimal" placeholder="매수단가" value="${cost}">
+    </div>`;
     if (!d) return `<div class="etfRow" data-sym="${s}"><div class="sym">${s}</div><div class="px">…</div><div></div>${qtyRow}</div>`;
     if (d.error) return `<div class="etfRow" data-sym="${s}"><div class="sym">${s}</div><div class="err">조회 실패</div><button class="delbtn" data-del="${s}">삭제</button>${qtyRow}</div>`;
     const pos = d.pct >= 0;
     const parts = [];
     if (qty) parts.push(`평가액 $${fmtInt(qty * d.price)}`);
+    if (qty && cost) {
+      const gain = (d.price - cost) * qty;
+      const gainPct = (d.price - cost) / cost * 100;
+      parts.push(`누적손익 <span style="color:${gain >= 0 ? "var(--up)" : "var(--down)"}">${gain >= 0 ? "+" : ""}$${fmtInt(gain)} (${gain >= 0 ? "+" : ""}${fmt(gainPct)}%)</span>`);
+    }
     if (d.div && d.div.yield != null) parts.push(`배당 ${fmt(d.div.yield)}%${d.div.rate != null ? ` ($${fmt(d.div.rate)}/주)` : ""}`);
     if (qty && d.div && d.div.rate != null) parts.push(`연배당 예상 $${fmtInt(qty * d.div.rate)}`);
+    if (d.divHistory && d.divHistory.length) parts.push(`최근 배당 ${d.divHistory[0].date} $${fmt(d.divHistory[0].amount, 3)}/주`);
     return `<div class="etfRow" data-sym="${s}">
       <div class="sym">${s}<button class="delbtn" data-del="${s}" style="margin-left:6px">삭제</button></div>
       <div class="px">$${fmt(d.price)}</div>
@@ -338,11 +355,15 @@ function renderEtfRows(syms, data) {
     setEtfQty(inp.dataset.qty, inp.value);
     renderEtfRows(LS.get("etfSymbols", DEFAULT_ETFS), lastEtfData);
   }));
+  $$("[data-cost]", box).forEach(inp => inp.addEventListener("change", () => {
+    setEtfCost(inp.dataset.cost, inp.value);
+    renderEtfRows(LS.get("etfSymbols", DEFAULT_ETFS), lastEtfData);
+  }));
 }
 let lastEtfData = {};
 function yahooUrls(symbol) {
-  const target = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
-  const target2 = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
+  const target = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1y&events=div`;
+  const target2 = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1y&events=div`;
   return [target, target2, ...corsProxies(target)];
 }
 async function fetchQuote(symbol) {
@@ -352,7 +373,12 @@ async function fetchQuote(symbol) {
   const price = r.meta.regularMarketPrice;
   const prev = r.meta.chartPreviousClose ?? r.meta.previousClose;
   if (price == null || prev == null) throw new Error("no price");
-  return { price, pct: ((price - prev) / prev) * 100, name: r.meta.longName || r.meta.shortName || "" };
+  const divEvents = (r.events && r.events.dividends) ? Object.values(r.events.dividends) : [];
+  const divHistory = divEvents
+    .map(e => ({ date: new Date(e.date * 1000).toISOString().slice(0, 10), amount: e.amount }))
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 3);
+  return { price, pct: ((price - prev) / prev) * 100, name: r.meta.longName || r.meta.shortName || "", divHistory };
 }
 function quoteSummaryUrls(symbol) {
   const target = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=summaryDetail`;
