@@ -143,12 +143,22 @@ async function loadFx(force) {
       }
     } catch {}
     if (rate == null) {
-      const cur = await fetchJSON(`https://api.frankfurter.app/latest?from=USD&to=KRW`);
-      rate = cur.rates && cur.rates.KRW;
+      try {
+        const cur = await fetchJSON(`https://api.frankfurter.app/latest?from=USD&to=KRW`);
+        rate = cur.rates && cur.rates.KRW;
+      } catch {}
     }
     if (rate == null) {
-      const alt = await fetchJSON(`https://open.er-api.com/v6/latest/USD`);
-      rate = alt.rates && alt.rates.KRW;
+      try {
+        const alt = await fetchJSON(`https://open.er-api.com/v6/latest/USD`);
+        rate = alt.rates && alt.rates.KRW;
+      } catch {}
+    }
+    if (rate == null) {
+      try {
+        const alt2 = await fetchJSON(`https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json`);
+        rate = alt2.usd && alt2.usd.krw;
+      } catch {}
     }
     if (rate == null) throw new Error("환율 조회 실패");
     fxRate = rate;
