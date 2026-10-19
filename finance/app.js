@@ -56,6 +56,14 @@ async function fetchFirstOkText(urls, ms = 8000) {
   }
   throw lastErr || new Error("모든 소스 실패");
 }
+// corsproxy.io는 2024년부터 무료 사용 시 401(가입/키 필요)을 반환해 제외함.
+// codetabs/allorigins는 무료·무키로 계속 동작하는 대체 프록시.
+function corsProxies(target) {
+  return [
+    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(target)}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`
+  ];
+}
 
 // =========================================================
 // 탭 전환
@@ -335,12 +343,7 @@ let lastEtfData = {};
 function yahooUrls(symbol) {
   const target = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
   const target2 = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
-  return [
-    target,
-    target2,
-    `https://corsproxy.io/?url=${encodeURIComponent(target)}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`
-  ];
+  return [target, target2, ...corsProxies(target)];
 }
 async function fetchQuote(symbol) {
   const json = await fetchFirstOk(yahooUrls(symbol), 7000);
@@ -354,7 +357,7 @@ async function fetchQuote(symbol) {
 function quoteSummaryUrls(symbol) {
   const target = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=summaryDetail`;
   const target2 = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=summaryDetail`;
-  return [target, target2, `https://corsproxy.io/?url=${encodeURIComponent(target)}`, `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`];
+  return [target, target2, ...corsProxies(target)];
 }
 async function fetchDividend(symbol) {
   const json = await fetchFirstOk(quoteSummaryUrls(symbol), 7000);
@@ -643,10 +646,7 @@ async function loadCdBench(force) {
 // 렌더링되는 경우(흔함) 원문 HTML에는 숫자가 없어서 실패할 수 있음 — 그럴 땐 벤치마크로 대체.
 async function fetchFidelityCdRates() {
   const target = "https://www.fidelity.com/fixed-income-bonds/cds/new-issue-cds";
-  const urls = [
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`,
-    `https://corsproxy.io/?url=${encodeURIComponent(target)}`
-  ];
+  const urls = [...corsProxies(target), `https://r.jina.ai/${target}`];
   const html = await fetchFirstOkText(urls, 9000);
   const text = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ");
   const re = /(\d{1,2})\s*[-]?\s*(Month|Months|Year|Years|Mo|Yr)s?\b[^%\d]{0,40}?(\d{1,2}\.\d{1,3})\s*%/gi;
@@ -695,24 +695,27 @@ const NEWS_FEEDS = [
   { name: "Yahoo Finance", url: "https://finance.yahoo.com/news/rssindex" }
 ];
 const paneNews = $("#pane-news");
+const NEWS_LIMIT = 15;
 function newsSkeleton() {
   paneNews.innerHTML = `
     <div class="card"><h2><span class="lbl">주요 경제·시장 뉴스</span></h2><div id="newsList"><div class="status">불러오는 중…</div></div></div>
     <div class="row"><button class="btn sm" id="newsRefresh">새로고침</button></div>
-    <p class="disclaim">CNBC·MarketWatch·Yahoo Finance의 공개 RSS 피드를 모아 최신순으로 보여줍니다. 기사를 누르면 해당 언론사 사이트로 이동합니다.</p>
+    <p class="disclaim">CNBC·MarketWatch·Yahoo Finance의 공개 RSS 피드를 모아 한글로 요약·번역해 보여줍니다(자동번역, 부정확할 수 있음). 원문이 궁금하면 "원문" 링크를 누르세요.</p>
   `;
   $("#newsRefresh").addEventListener("click", () => loadNews(true));
 }
 async function fetchFeed(url, ms = 8000) {
-  const urls = [url, `https://corsproxy.io/?url=${encodeURIComponent(url)}`, `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`];
+  const urls = [url, ...corsProxies(url)];
   const xml = await fetchFirstOkText(urls, ms);
   const doc = new DOMParser().parseFromString(xml, "application/xml");
   if (doc.querySelector("parsererror")) throw new Error("feed parse error");
   return doc;
 }
+function stripHtml(s) { return s.replace(/<!\[CDATA\[|\]\]>/g, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(); }
 function parseRssItems(doc, sourceName, limit = 10) {
   return Array.from(doc.querySelectorAll("item")).slice(0, limit).map(item => ({
     title: (item.querySelector("title")?.textContent || "").trim(),
+    description: stripHtml(item.querySelector("description")?.textContent || "").slice(0, 220),
     link: (item.querySelector("link")?.textContent || "#").trim(),
     pubDate: (item.querySelector("pubDate")?.textContent || "").trim(),
     source: sourceName
@@ -727,6 +730,24 @@ function timeAgo(pubDateStr) {
   const diffH = Math.round(diffMin / 60);
   if (diffH < 24) return diffH + "시간 전";
   return Math.round(diffH / 24) + "일 전";
+}
+// 구글 번역 비공식 엔드포인트(무료/무키, 많은 오픈소스 번역위젯이 쓰는 방식) + 프록시 대체
+async function translateToKo(text) {
+  if (!text) return "";
+  const target = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=${encodeURIComponent(text)}`;
+  const json = await fetchFirstOk([target, ...corsProxies(target)], 6000);
+  if (!Array.isArray(json) || !Array.isArray(json[0])) throw new Error("번역 응답 형식 오류");
+  return json[0].map(seg => seg[0]).join("");
+}
+function newsCardHtml(it, idx) {
+  return `
+    <div class="newsCard" id="newsCard${idx}">
+      <div class="newsKo" id="newsKo${idx}">번역 중…</div>
+      <div class="newsEn">${escapeHtml(it.title)}</div>
+      ${it.description ? `<div class="newsDesc" id="newsDesc${idx}" hidden></div>` : ""}
+      <div class="newsMeta">${escapeHtml(it.source)} · ${timeAgo(it.pubDate)} · <a href="${escapeHtml(it.link)}" target="_blank" rel="noopener">원문 ↗</a></div>
+    </div>
+  `;
 }
 let newsLoadedOnce = false;
 async function loadNews(force) {
@@ -746,13 +767,23 @@ async function loadNews(force) {
     return;
   }
   items.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
-  box.innerHTML = items.slice(0, 25).map(it => `
-    <a class="newsRow" href="${escapeHtml(it.link)}" target="_blank" rel="noopener">
-      <div class="newsTitle">${escapeHtml(it.title)}</div>
-      <div class="newsMeta">${escapeHtml(it.source)} · ${timeAgo(it.pubDate)}</div>
-    </a>
-  `).join("");
+  items = items.slice(0, NEWS_LIMIT);
+  box.innerHTML = items.map(newsCardHtml).join("");
   setUpdated(nowLabel() + " 업데이트");
+  items.forEach(async (it, idx) => {
+    try {
+      const ko = await translateToKo(it.title);
+      const el = $("#newsKo" + idx);
+      if (el) el.textContent = ko;
+    } catch { const el = $("#newsKo" + idx); if (el) el.textContent = it.title; }
+    if (it.description) {
+      try {
+        const koDesc = await translateToKo(it.description);
+        const el = $("#newsDesc" + idx);
+        if (el) { el.textContent = koDesc; el.hidden = false; }
+      } catch {}
+    }
+  });
 }
 
 // =========================================================
