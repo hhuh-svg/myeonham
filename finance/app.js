@@ -417,9 +417,101 @@ async function loadBenchmark(force) {
 // 4) 비과세 지방채: "지금 사도 될 만한 수익률인가" 자동 기준선 계산기
 // =========================================================
 const paneMuni = $("#pane-muni");
+// 실제 보유 지방채(2026-10-19 피델리티 포지션 화면에서 받은 데이터로 시딩)
+const DEFAULT_MUNI_HOLDINGS = [
+  { cusip: "09182TGW1", name: "BLACK BELT ENERGY GAS DIST", coupon: 5.000, maturity: "2035-12-01", face: 85000, price: 100.534 },
+  { cusip: "213345MB4", name: "COOK CNTY ILL SCH DIST NO 02", coupon: 5.000, maturity: "2037-12-15", face: 35000, price: 103.54 },
+  { cusip: "46247EPP4", name: "IOWA FIN AUTH SINGLE FAMILY", coupon: 4.150, maturity: "2037-07-01", face: 10000, price: 94.738 },
+  { cusip: "61212WL29", name: "MONTANA ST BRD HSG SINGLE F", coupon: 4.150, maturity: "2037-06-01", face: 20000, price: 94.438 },
+  { cusip: "880443JM9", name: "TENNESSEE ENERGY ACQUISITI", coupon: 5.000, maturity: "2035-12-01", face: 30000, price: 100.534 },
+  { cusip: "914729WA2", name: "UNIVERSITY NORTH TEX UNIV R", coupon: 5.000, maturity: "2036-04-15", face: 5000, price: 104.005 }
+];
+const MUNI_HOLDINGS_VERSION = 1;
+if (LS.get("muniHoldingsVersion", 0) !== MUNI_HOLDINGS_VERSION) {
+  LS.set("muniHoldings", DEFAULT_MUNI_HOLDINGS);
+  LS.set("muniHoldingsVersion", MUNI_HOLDINGS_VERSION);
+}
+function loadMuniHoldings() { return LS.get("muniHoldings", DEFAULT_MUNI_HOLDINGS); }
+function setMuniPrice(cusip, val) {
+  const list = loadMuniHoldings();
+  const h = list.find(x => x.cusip === cusip);
+  const n = parseFloat(val);
+  if (h && isFinite(n)) { h.price = n; LS.set("muniHoldings", list); }
+}
+function deleteMuniHolding(cusip) { LS.set("muniHoldings", loadMuniHoldings().filter(x => x.cusip !== cusip)); }
+function addMuniHolding(h) { const list = loadMuniHoldings(); list.push(h); LS.set("muniHoldings", list); }
+function isoDate(d) { return d.toISOString().slice(0, 10); }
+function daysUntil(d) { const t0 = new Date(); const t = new Date(Date.UTC(t0.getUTCFullYear(), t0.getUTCMonth(), t0.getUTCDate())); return Math.round((d.getTime() - t.getTime()) / 86400000); }
+// 공시된 다음 쿠폰일이 없을 때, 만기 월/일 기준 6개월 간격 지급을 가정해 다음 지급일을 추정
+function nextCouponDate(maturityISO) {
+  const [, mmStr, mdStr] = maturityISO.split("-");
+  const mm = parseInt(mmStr, 10), md = parseInt(mdStr, 10);
+  const now = new Date();
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const candidates = [];
+  for (let yOff = -1; yOff <= 1; yOff++) {
+    const y = now.getUTCFullYear() + yOff;
+    [[mm, y], [((mm + 5) % 12) + 1, mm + 6 > 12 ? y + 1 : y]].forEach(([m, yy]) => candidates.push(new Date(Date.UTC(yy, m - 1, md))));
+  }
+  const future = candidates.filter(d => d.getTime() > today.getTime()).sort((a, b) => a - b);
+  return future[0] || null;
+}
+function renderMuniHoldings() {
+  const box = $("#muniHoldBox");
+  if (!box) return;
+  const list = loadMuniHoldings();
+  if (!list.length) { box.innerHTML = `<div class="empty2">등록된 보유 지방채가 없습니다</div>`; return; }
+  const enriched = list.map(h => {
+    const nc = nextCouponDate(h.maturity);
+    return { ...h, nc, amt: h.face * h.coupon / 100 / 2, mv: h.face * h.price / 100 };
+  }).sort((a, b) => (a.nc ? a.nc.getTime() : Infinity) - (b.nc ? b.nc.getTime() : Infinity));
+  const totalMv = enriched.reduce((s, h) => s + h.mv, 0);
+  box.innerHTML = `
+    <div class="small" style="margin-bottom:10px">평가총액 $${fmtInt(totalMv)} (최근 입력가 기준)</div>
+    ${enriched.map((h, i) => `
+      <div class="bondCard${i === 0 ? " nearest" : ""}">
+        <div class="bondName">${escapeHtml(h.name)}</div>
+        <div class="small">CUSIP ${escapeHtml(h.cusip)} · ${fmt(h.coupon, 3)}% · 만기 ${h.maturity}</div>
+        <div class="bondStats">
+          <div><span class="k">다음 쿠폰</span><span class="v">${h.nc ? fmtDateShort(isoDate(h.nc)) : "-"}${h.nc ? ` (D-${daysUntil(h.nc)})` : ""}</span></div>
+          <div><span class="k">쿠폰금액</span><span class="v">$${fmt(h.amt, 2)}</span></div>
+          <div><span class="k">평가액</span><span class="v">$${fmtInt(h.mv)}</span></div>
+        </div>
+        <div class="bondFoot">
+          <span class="small">액면 $${fmtInt(h.face)} · 가격</span>
+          <input class="qtyInput" data-price="${escapeHtml(h.cusip)}" type="number" step="0.001" value="${h.price}">
+          <button class="delbtn" data-delmuni="${escapeHtml(h.cusip)}" style="margin-left:auto">삭제</button>
+        </div>
+      </div>
+    `).join("")}
+    <p class="note">쿠폰 지급일은 만기 월·일을 기준으로 6개월 간격 지급을 가정한 추정값입니다 — 실제 발행조건과 다를 수 있습니다. 가격은 직접 확인해서 가끔 업데이트해주세요(자동조회 불가).</p>
+  `;
+  $$("[data-price]", box).forEach(inp => inp.addEventListener("change", () => { setMuniPrice(inp.dataset.price, inp.value); renderMuniHoldings(); }));
+  $$("[data-delmuni]", box).forEach(b => b.addEventListener("click", () => { deleteMuniHolding(b.dataset.delmuni); renderMuniHoldings(); }));
+}
 function muniSkeleton() {
   const c = LS.get("muniCalc", { fed: "32", state: "0", src: "irx", custom: "", check: "" });
   paneMuni.innerHTML = `
+    <div class="card">
+      <h2>보유 지방채</h2>
+      <div id="muniHoldBox"></div>
+      <div class="row" style="margin-top:10px"><button class="btn sm" id="muniHoldAddBtn">+ 종목 추가</button></div>
+      <div class="logform" id="muniHoldForm">
+        <input id="hName" placeholder="종목명">
+        <div class="two">
+          <input id="hCusip" placeholder="CUSIP" maxlength="9" style="text-transform:uppercase">
+          <input id="hMaturity" type="date" placeholder="만기일">
+        </div>
+        <div class="two">
+          <input id="hCoupon" type="number" step="0.001" placeholder="쿠폰금리(%)">
+          <input id="hFace" type="number" step="1" placeholder="액면가($)">
+        </div>
+        <div class="two">
+          <input id="hPrice" type="number" step="0.001" placeholder="현재가(100당)">
+          <button class="btn sm primary" id="hSave">저장</button>
+        </div>
+      </div>
+    </div>
     <div class="card calc">
       <h2>매수 기준선 (자동 계산)</h2>
       <div class="f"><label>비교 기준</label>
@@ -450,6 +542,23 @@ function muniSkeleton() {
   ["mCustom", "mFed", "mState"].forEach(id => $("#" + id).addEventListener("input", calcMuni));
   $("#mCheck").addEventListener("input", calcMuni);
   $("#muniRefresh").addEventListener("click", () => loadMuniBench(true));
+  $("#muniHoldAddBtn").addEventListener("click", () => $("#muniHoldForm").classList.toggle("open"));
+  $("#hSave").addEventListener("click", () => {
+    const name = $("#hName").value.trim();
+    const cusip = $("#hCusip").value.trim().toUpperCase();
+    const coupon = parseFloat($("#hCoupon").value);
+    const face = parseFloat($("#hFace").value);
+    const price = parseFloat($("#hPrice").value);
+    const maturity = $("#hMaturity").value;
+    if (!name || !cusip || !isFinite(coupon) || !isFinite(face) || !isFinite(price) || !maturity) {
+      toast("모든 항목을 입력하세요"); return;
+    }
+    addMuniHolding({ cusip, name, coupon, maturity, face, price });
+    ["hName", "hCusip", "hMaturity", "hCoupon", "hFace", "hPrice"].forEach(id => $("#" + id).value = "");
+    $("#muniHoldForm").classList.remove("open");
+    renderMuniHoldings();
+  });
+  renderMuniHoldings();
 }
 function muniThreshold() {
   const fed = parseFloat($("#mFed").value) || 0;
