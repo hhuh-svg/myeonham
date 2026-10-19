@@ -65,6 +65,9 @@ $$('.tabs button').forEach(b => b.addEventListener("click", () => showTab(b.data
 // =========================================================
 let fxLoaded = false;
 const paneFx = $("#pane-fx");
+const FX_PERIODS = ["1w", "1m", "6m", "1y", "3y"];
+const FX_PERIOD_DAYS = { "1w": 7, "1m": 30, "6m": 182, "1y": 365, "3y": 1095 };
+const FX_PERIOD_LABELS = { "1w": "1주", "1m": "1개월", "6m": "6개월", "1y": "1년", "3y": "3년" };
 function fxSkeleton() {
   paneFx.innerHTML = `
     <div class="card" id="fxCard">
@@ -113,20 +116,25 @@ function sparkSVG(values, w = 300, h = 44) {
   }).join(" ");
   const up = values[values.length - 1] >= values[0];
   const color = up ? "var(--up)" : "var(--down)";
-  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>`;
+  return `<svg class="spark big" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>`;
 }
+function fmtDateShort(iso) {
+  const [y, m, d] = iso.split("-");
+  return `${y}.${m}.${d}`;
+}
+let fxPeriod = LS.get("fxPeriod", "1m");
 async function loadFx(force) {
   fxLoaded = true;
   const card = $("#fxCard");
   card.innerHTML = `<h2><span class="lbl">USD → KRW</span></h2><div class="status">불러오는 중…</div>`;
   try {
     const today = new Date();
-    const past = new Date(today.getTime() - 12 * 86400000);
+    const back = new Date(today.getTime() - FX_PERIOD_DAYS[fxPeriod] * 86400000);
     const iso = d => d.toISOString().slice(0, 10);
-    let rate = null, history = [], prevRate = null;
+    let rate = null, days = [], history = [], prevRate = null;
     try {
-      const series = await fetchJSON(`https://api.frankfurter.app/${iso(past)}..${iso(today)}?from=USD&to=KRW`);
-      const days = Object.keys(series.rates || {}).sort();
+      const series = await fetchJSON(`https://api.frankfurter.app/${iso(back)}..${iso(today)}?from=USD&to=KRW`);
+      days = Object.keys(series.rates || {}).sort();
       history = days.map(d => series.rates[d].KRW);
       if (history.length) {
         rate = history[history.length - 1];
@@ -145,15 +153,35 @@ async function loadFx(force) {
     fxRate = rate;
     const chg = prevRate != null ? rate - prevRate : null;
     const chgPct = prevRate != null ? (chg / prevRate) * 100 : null;
+    const hasChart = history.length > 2;
+    const hi = hasChart ? Math.max(...history) : null;
+    const lo = hasChart ? Math.min(...history) : null;
+    const periodChg = hasChart ? ((history[history.length - 1] - history[0]) / history[0]) * 100 : null;
     card.innerHTML = `
       <h2><span class="lbl">USD → KRW</span></h2>
       <div class="fxRate">
         <span class="num">₩${fmt(rate)}</span>
-        ${chg != null ? `<span class="chg ${chg >= 0 ? "pos" : "neg"}">${chg >= 0 ? "▲" : "▼"} ${fmt(Math.abs(chg))} (${fmt(Math.abs(chgPct))}%)</span>` : ""}
+        ${chg != null ? `<span class="chg ${chg >= 0 ? "pos" : "neg"}">${chg >= 0 ? "▲" : "▼"} ${fmt(Math.abs(chg))} (${fmt(Math.abs(chgPct))}%) 전일대비</span>` : ""}
       </div>
       <div class="fxSub">1 USD 기준 · 중간시장가 참고용</div>
-      ${history.length > 2 ? sparkSVG(history) : ""}
+      <div class="segrow" id="fxPeriodRow">
+        ${FX_PERIODS.map(p => `<button class="seg" data-p="${p}" aria-pressed="${p === fxPeriod}">${FX_PERIOD_LABELS[p]}</button>`).join("")}
+      </div>
+      ${hasChart ? `
+        <div class="chartMeta">
+          <span>고 ₩${fmt(hi)}</span>
+          <span class="${periodChg >= 0 ? "pos" : "neg"}">${FX_PERIOD_LABELS[fxPeriod]} ${periodChg >= 0 ? "▲" : "▼"} ${fmt(Math.abs(periodChg))}%</span>
+          <span>저 ₩${fmt(lo)}</span>
+        </div>
+        ${sparkSVG(history, 320, 110)}
+        <div class="chartDates"><span>${fmtDateShort(days[0])}</span><span>${fmtDateShort(days[days.length - 1])}</span></div>
+      ` : `<div class="small" style="margin-top:8px">차트 데이터를 가져오지 못했습니다.</div>`}
     `;
+    $$("#fxPeriodRow .seg").forEach(b => b.addEventListener("click", () => {
+      fxPeriod = b.dataset.p;
+      LS.set("fxPeriod", fxPeriod);
+      loadFx(true);
+    }));
     convertFrom("usd"); convertFrom("krw");
     setUpdated(nowLabel() + " 업데이트");
   } catch (e) {
@@ -280,13 +308,6 @@ const paneMuni = $("#pane-muni");
 function muniSkeleton() {
   const c = LS.get("muniCalc", { fed: "32", state: "0", src: "irx", custom: "", check: "" });
   paneMuni.innerHTML = `
-    <div class="card">
-      <div class="row" style="margin-bottom:4px">
-        <a class="btn primary" href="https://www.fidelity.com/fixed-income-bonds/municipal-bonds" target="_blank" rel="noopener">피델리티 지방채 바로가기</a>
-        <a class="btn" href="https://digital.fidelity.com/ftgw/digital/research/bond" target="_blank" rel="noopener">채권 스크리너 (로그인)</a>
-      </div>
-      <p class="note">개별 지방채 매물은 로그인 화면에만 떠서 앱이 목록을 자동으로 가져올 수 없습니다. 대신 미국채 수익률을 실시간으로 가져와 "지금 신규로 살 만한 수익률 기준선"을 계산해드려요. 피델리티 스크리너에서 이 기준을 넘는 종목을 찾으면 됩니다.</p>
-    </div>
     <div class="card calc">
       <h2>매수 기준선 (자동 계산)</h2>
       <div class="f"><label>비교 기준</label>
@@ -302,14 +323,15 @@ function muniSkeleton() {
         <div class="f"><label>주(State) 소득세율 (%)</label><input id="mState" type="number" step="1" inputmode="decimal" value="${c.state}"></div>
       </div>
       <div class="resultBox" id="mResult"><div class="small">불러오는 중…</div></div>
-      <p class="note">텍사스(TX)처럼 주소득세가 없으면 주 세율은 0으로 둡니다 — 이 경우 지방채의 발행 주와 무관하게 연방세만 비교하면 됩니다. AMT 대상 채권·NIIT 등은 반영하지 않은 단순 참고치이며 투자 조언이 아닙니다.</p>
+      <p class="note">텍사스(TX)처럼 주소득세가 없으면 주 세율은 0으로 둡니다. AMT 대상 채권·NIIT 등은 반영하지 않은 단순 참고치이며 투자 조언이 아닙니다.</p>
     </div>
     <div class="card calc">
       <h2>후보 종목 바로 확인</h2>
-      <div class="f"><label>피델리티에서 본 지방채 수익률 (%)</label><input id="mCheck" type="number" step="0.01" inputmode="decimal" placeholder="예: 3.80" value="${c.check}"></div>
+      <div class="f"><label>확인하고 싶은 지방채 수익률 (%)</label><input id="mCheck" type="number" step="0.01" inputmode="decimal" placeholder="예: 3.80" value="${c.check}"></div>
       <div class="resultBox" id="mCheckResult"><div class="small">수익률을 입력하면 기준선과 바로 비교해드려요</div></div>
     </div>
     <div class="row"><button class="btn sm" id="muniRefresh">미국채 수익률 새로고침</button></div>
+    <p class="disclaim">개별 지방채 매물 목록은 로그인 전용이라 이 앱이 직접 가져올 순 없습니다 — <a href="https://www.fidelity.com/fixed-income-bonds/municipal-bonds" target="_blank" rel="noopener">피델리티에서 찾기 ↗</a></p>
   `;
   $("#mSrc").value = c.src;
   $("#mCustomWrap").hidden = c.src !== "custom";
@@ -370,16 +392,9 @@ async function loadMuniBench(force) {
 const paneCd = $("#pane-cd");
 function cdSkeleton() {
   paneCd.innerHTML = `
-    <div class="card">
-      <div class="row" style="margin-bottom:4px">
-        <a class="btn primary" href="https://www.fidelity.com/fixed-income-bonds/cds/new-issue-cds" target="_blank" rel="noopener">피델리티 신규발행 CD 바로가기</a>
-        <a class="btn" href="https://digital.fidelity.com/ftgw/digital/research/bond" target="_blank" rel="noopener">채권 스크리너 (로그인)</a>
-      </div>
-      <p class="note">브로커드 CD 개별 금리는 로그인 화면에만 떠서 앱이 "최고가"를 직접 긁어올 수 없습니다. 대신 미국채 수익률을 실시간으로 보여드리니, 피델리티에서 이보다 낮은 금리만 보이면 다른 만기·발행사를 더 찾아보세요.</p>
-    </div>
     <div class="card" id="cdBenchCard"><h2><span class="lbl">미국채 수익률 (참고 벤치마크)</span></h2><div class="status">불러오는 중…</div></div>
     <div class="row"><button class="btn sm" id="cdRefresh">새로고침</button></div>
-    <p class="disclaim">브로커드 CD는 발행사·물량에 따라 보통 같은 만기 미국채보다 0.1~0.3%p 정도 높게 나오는 경우가 많습니다(시장 상황에 따라 다를 수 있음). 실제 최고 금리는 반드시 피델리티에서 직접 확인하세요.</p>
+    <p class="disclaim">브로커드 CD는 발행사·물량에 따라 보통 같은 만기 미국채보다 0.1~0.3%p 정도 높게 나오는 경우가 많습니다(시장 상황에 따라 다를 수 있음). 개별 금리 "최고가"는 로그인 전용이라 이 앱이 직접 가져올 순 없습니다 — <a href="https://www.fidelity.com/fixed-income-bonds/cds/new-issue-cds" target="_blank" rel="noopener">피델리티에서 찾기 ↗</a></p>
   `;
   $("#cdRefresh").addEventListener("click", () => loadCdBench(true));
 }
