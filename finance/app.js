@@ -512,7 +512,13 @@ const benchLoadedFor = { muni: false, cd: false };
 let bench = { irx: null, fvx: null, tnx: null, tyx: null, loadedAt: 0 };
 async function loadBenchmark(force) {
   if (bench.loadedAt && !force && Date.now() - bench.loadedAt < 5 * 60000) return bench;
-  const results = await Promise.allSettled(BENCH_SERIES.map(s => fetchQuote(s.ticker)));
+  // 4개를 한꺼번에 쏘면(특히 직접호출이 막혀 전부 프록시로 넘어갈 때) CD 탭의 다른 프록시
+  // 요청(CD 금리 스크래핑)과 겹쳐 무료 프록시 서비스 쪽에서 과부하로 같이 실패하기 쉬워
+  // 동시 처리 개수를 제한
+  const results = await mapWithConcurrency(BENCH_SERIES, 2, async s => {
+    try { return { status: "fulfilled", value: await fetchQuote(s.ticker) }; }
+    catch (e) { return { status: "rejected", reason: e }; }
+  });
   const next = { loadedAt: Date.now() };
   BENCH_SERIES.forEach((s, i) => { next[s.key] = results[i].status === "fulfilled" ? results[i].value.price : null; });
   bench = next;
@@ -837,18 +843,32 @@ async function loadCdBench(force) {
 // 은행/증권사 공개 CD 페이지에서 금리표를 직접 긁어오는 시도. 로그인 없이 보이는 화면이 JS로
 // 렌더링되는 경우(흔함) 원문 HTML에는 숫자가 없어서 실패할 수 있음 — 그럴 땐 벤치마크로 대체.
 async function scrapeCdRates(target) {
-  const tiers = [corsProxies(target), [`https://r.jina.ai/${target}`]];
-  const html = await fetchFirstOkText(tiers, 6000);
+  // r.jina.ai는 페이지를 실제로 렌더링해서 텍스트로 반환해주는 서비스라 일반 프록시보다 느림
+  let html;
+  try { html = await fetchFirstOkText([corsProxies(target)], 6000); }
+  catch (e1) {
+    try { html = await fetchFirstOkText([[`https://r.jina.ai/${target}`]], 10000); }
+    catch (e2) { throw new Error(e1.message + " / " + e2.message); }
+  }
   const text = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ");
-  const re = /(\d{1,2})\s*[-]?\s*(Month|Months|Year|Years|Mo|Yr)s?\b[^%\d]{0,40}?(\d{1,2}\.\d{1,3})\s*%/gi;
+  const TERM = /(\d{1,2})\s*[-]?\s*(Month|Months|Year|Years|Mo|Yr|Day|Days)s?\b/i;
+  // 사이트마다 "기간 ... 금리%" 또는 "금리% ... 기간" 순서가 달라서 양쪽 다 시도
+  const reForward = new RegExp(TERM.source + `[^%\\d]{0,60}?(\\d{1,2}\\.\\d{1,3})\\s*%`, "gi");
+  const reBackward = new RegExp(`(\\d{1,2}\\.\\d{1,3})\\s*%[^%\\d]{0,60}?` + TERM.source, "gi");
   const found = [];
   const seen = new Set();
   let m;
-  while ((m = re.exec(text)) && found.length < 12) {
+  while ((m = reForward.exec(text)) && found.length < 12) {
     const key = m[1] + m[2][0].toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     found.push({ term: `${m[1]} ${m[2]}`, apy: parseFloat(m[3]) });
+  }
+  while ((m = reBackward.exec(text)) && found.length < 12) {
+    const key = m[2] + m[3][0].toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    found.push({ term: `${m[2]} ${m[3]}`, apy: parseFloat(m[1]) });
   }
   if (!found.length) throw new Error("금리표를 찾지 못함 (페이지가 자바스크립트로 그려지는 경우일 수 있음)");
   return found;
