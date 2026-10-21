@@ -277,6 +277,23 @@ if (LS.get("etfDefaultsVersion", 1) !== ETF_DEFAULTS_VERSION) {
   LS.set("etfSymbols", DEFAULT_ETFS);
   LS.set("etfDefaultsVersion", ETF_DEFAULTS_VERSION);
 }
+// 피델리티 포지션 화면(Qty/Avg. Cost)에서 받은 실제 보유수량·매수단가 시딩(2026-10-21)
+const DEFAULT_ETF_QTY = {
+  BST: 178.107, GLDM: 800, GOOGL: 24.65, IAU: 79.171, LLY: 4.199, MGK: 418.066,
+  MSFT: 18.118, NVDA: 95.166, QQQ: 25.61, QQQM: 308.296, SCHP: 2000, SGOV: 3000,
+  SMH: 130.546, SUB: 308, TSLA: 98.174, VOO: 109.637, VTES: 700, VXUS: 310
+};
+const DEFAULT_ETF_COST = {
+  BST: 49.18, GLDM: 86.08, GOOGL: 349.33, IAU: 81.08, LLY: 1165.55, MGK: 92.16,
+  MSFT: 516.72, NVDA: 229.42, QQQ: 724.17, QQQM: 304.79, SCHP: 25.71, SGOV: 100.61,
+  SMH: 599.59, SUB: 104.58, TSLA: 366.95, VOO: 708.96, VTES: 98.59, VXUS: 87.13
+};
+const ETF_POSITIONS_VERSION = 1;
+if (LS.get("etfPositionsVersion", 0) !== ETF_POSITIONS_VERSION) {
+  LS.set("etfQty", DEFAULT_ETF_QTY);
+  LS.set("etfCost", DEFAULT_ETF_COST);
+  LS.set("etfPositionsVersion", ETF_POSITIONS_VERSION);
+}
 const INDEX_TICKERS = [{ sym: "^GSPC", label: "S&P 500" }, { sym: "^IXIC", label: "나스닥" }];
 let etfLoadedOnce = false;
 const paneEtf = $("#pane-etf");
