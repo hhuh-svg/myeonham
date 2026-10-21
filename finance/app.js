@@ -542,41 +542,20 @@ if (LS.get("govBondVersion", 0) !== GOV_BOND_VERSION) {
   LS.set("govBondVersion", GOV_BOND_VERSION);
 }
 const govBonds = createBondHoldings("govBondHoldings", DEFAULT_GOV_BOND_HOLDINGS);
-function isoDate(d) { return d.toISOString().slice(0, 10); }
-function daysUntil(d) { const t0 = new Date(); const t = new Date(Date.UTC(t0.getUTCFullYear(), t0.getUTCMonth(), t0.getUTCDate())); return Math.round((d.getTime() - t.getTime()) / 86400000); }
-// 공시된 다음 쿠폰일이 없을 때, 만기 월/일 기준 6개월 간격 지급을 가정해 다음 지급일을 추정
-function nextCouponDate(maturityISO) {
-  const [, mmStr, mdStr] = maturityISO.split("-");
-  const mm = parseInt(mmStr, 10), md = parseInt(mdStr, 10);
-  const now = new Date();
-  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const candidates = [];
-  for (let yOff = -1; yOff <= 1; yOff++) {
-    const y = now.getUTCFullYear() + yOff;
-    [[mm, y], [((mm + 5) % 12) + 1, mm + 6 > 12 ? y + 1 : y]].forEach(([m, yy]) => candidates.push(new Date(Date.UTC(yy, m - 1, md))));
-  }
-  const future = candidates.filter(d => d.getTime() > today.getTime()).sort((a, b) => a - b);
-  return future[0] || null;
-}
 function renderBondHoldings(boxId, ctrl, emptyLabel) {
   const box = $("#" + boxId);
   if (!box) return;
   const list = ctrl.load();
   if (!list.length) { box.innerHTML = `<div class="empty2">${emptyLabel}</div>`; return; }
-  const enriched = list.map(h => {
-    const nc = nextCouponDate(h.maturity);
-    return { ...h, nc, amt: h.face * h.coupon / 100 / 2, mv: h.face * h.price / 100 };
-  }).sort((a, b) => (a.nc ? a.nc.getTime() : Infinity) - (b.nc ? b.nc.getTime() : Infinity));
+  const enriched = list.map(h => ({ ...h, mv: h.face * h.price / 100 })).sort((a, b) => b.mv - a.mv);
   const totalMv = enriched.reduce((s, h) => s + h.mv, 0);
   box.innerHTML = `
     <div class="small" style="margin-bottom:10px">평가총액 $${fmtInt(totalMv)} (최근 입력가 기준)</div>
-    ${enriched.map((h, i) => `
-      <div class="bondCard${i === 0 ? " nearest" : ""}">
+    ${enriched.map(h => `
+      <div class="bondCard">
         <div class="bondName">${escapeHtml(h.name)}</div>
         <div class="small">CUSIP ${escapeHtml(h.cusip)} · ${fmt(h.coupon, 3)}% · 만기 ${h.maturity}</div>
         <div class="bondStats">
-          <div><span class="k">다음 쿠폰</span><span class="v">${h.nc ? fmtDateShort(isoDate(h.nc)) : "-"}${h.nc ? ` (D-${daysUntil(h.nc)})` : ""}</span></div>
-          <div><span class="k">쿠폰금액</span><span class="v">$${fmt(h.amt, 2)}</span></div>
           <div><span class="k">평가액</span><span class="v">$${fmtInt(h.mv)}</span></div>
         </div>
         <div class="bondFoot">
@@ -586,7 +565,7 @@ function renderBondHoldings(boxId, ctrl, emptyLabel) {
         </div>
       </div>
     `).join("")}
-    <p class="note">쿠폰 지급일은 만기 월·일을 기준으로 6개월 간격 지급을 가정한 추정값입니다 — 실제 발행조건과 다를 수 있습니다. 가격은 직접 확인해서 가끔 업데이트해주세요(자동조회 불가).</p>
+    <p class="note">개별 채권 가격은 자동조회가 안 돼서 직접 확인해 가끔 업데이트해주세요.</p>
   `;
   $$("[data-price]", box).forEach(inp => inp.addEventListener("change", () => { ctrl.setPrice(inp.dataset.price, inp.value); renderBondHoldings(boxId, ctrl, emptyLabel); }));
   $$("[data-del]", box).forEach(b => b.addEventListener("click", () => { ctrl.delete(b.dataset.del); renderBondHoldings(boxId, ctrl, emptyLabel); }));
@@ -756,23 +735,46 @@ const paneCd = $("#pane-cd");
 function cdSkeleton() {
   paneCd.innerHTML = `
     <div class="card" id="cdRatesCard"><h2><span class="lbl">피델리티 CD 금리 (실시간 시도)</span></h2><div class="status">불러오는 중…</div></div>
-    <div class="card" id="cdBenchCard"><h2><span class="lbl">미국채 수익률 (참고 벤치마크)</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="card" id="cdBenchCard"><h2><span class="lbl">금리</span></h2><div class="status">불러오는 중…</div></div>
     <div class="row"><button class="btn sm" id="cdRefresh">새로고침</button></div>
     <p class="disclaim">브로커드 CD는 발행사·물량에 따라 보통 같은 만기 미국채보다 0.1~0.3%p 정도 높게 나오는 경우가 많습니다(시장 상황에 따라 다를 수 있음). 정확한 최신 금리는 <a href="https://www.fidelity.com/fixed-income-bonds/cds/new-issue-cds" target="_blank" rel="noopener">피델리티에서 직접 확인 ↗</a></p>
   `;
   $("#cdRefresh").addEventListener("click", () => { loadCdBench(true); loadCdRates(true); });
 }
+function computeMuniThreshold() {
+  const c = LS.get("muniCalc", { fed: "32", state: "0", src: "irx", custom: "" });
+  const fed = parseFloat(c.fed) || 0;
+  const state = parseFloat(c.state) || 0;
+  const base = c.src === "custom" ? parseFloat(c.custom) : bench[c.src];
+  if (!Number.isFinite(base)) return null;
+  const combo = Math.min(0.9, (fed + state) / 100);
+  const srcInfo = BENCH_SERIES.find(s => s.key === c.src);
+  return { threshold: base * (1 - combo), srcLabel: srcInfo ? srcInfo.label : "직접입력", fed, state };
+}
+function rateRow(label, val, first) {
+  return `<div class="etfRow" style="grid-template-columns:1fr auto auto;${first ? "border-top:0" : ""}"><div class="sym">${label}</div><div class="px">${val != null ? fmt(val) + "%" : "조회 실패"}</div><div></div></div>`;
+}
 function renderCdBench() {
   const card = $("#cdBenchCard");
   if (!card) return;
-  if (bench.irx == null && bench.fvx == null) {
-    card.innerHTML = `<h2><span class="lbl">미국채 수익률 (참고 벤치마크)</span></h2><div class="status err">조회 실패. 네트워크를 확인하고 새로고침 해주세요.</div>`;
+  const vals = BENCH_SERIES.map(s => bench[s.key]);
+  if (vals.every(v => v == null)) {
+    card.innerHTML = `<h2><span class="lbl">금리</span></h2><div class="status err">조회 실패. 네트워크를 확인하고 새로고침 해주세요.</div>`;
     return;
   }
+  const muni = computeMuniThreshold();
   card.innerHTML = `
-    <h2><span class="lbl">미국채 수익률 (참고 벤치마크)</span></h2>
-    <div class="etfRow" style="border-top:0"><div class="sym">3개월 (단기)</div><div class="px">${bench.irx != null ? fmt(bench.irx) + "%" : "조회 실패"}</div><div></div></div>
-    <div class="etfRow"><div class="sym">5년 (중기)</div><div class="px">${bench.fvx != null ? fmt(bench.fvx) + "%" : "조회 실패"}</div><div></div></div>
+    <h2><span class="lbl">금리</span></h2>
+    <div class="small" style="margin:2px 0 4px">CD 금리 (벤치마크 — 브로커드 CD는 보통 이보다 0.1~0.3%p 높음)</div>
+    ${rateRow("3개월", bench.irx, true)}
+    ${rateRow("5년", bench.fvx)}
+    <div class="small" style="margin:14px 0 4px">지방채 매수 기준선 (세후환산, 연방 ${muni ? muni.fed : "-"}%·주 ${muni ? muni.state : "-"}% 가정, 미국채 ${muni ? muni.srcLabel : "-"} 기준)</div>
+    ${rateRow("세후환산 기준", muni ? muni.threshold : null, true)}
+    <div class="small" style="margin:14px 0 4px">국채 금리 (전체 만기)</div>
+    ${rateRow("3개월", bench.irx, true)}
+    ${rateRow("5년", bench.fvx)}
+    ${rateRow("10년", bench.tnx)}
+    ${rateRow("30년", bench.tyx)}
   `;
 }
 async function loadCdBench(force) {
