@@ -28,7 +28,7 @@ function setUpdated(text) { $("#updatedAt").textContent = text; }
 function nowLabel() { return new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }); }
 
 // ---------- 네트워크: 지정 시간 내 응답 없으면 포기, 여러 소스를 순서대로 시도 ----------
-function fetchJSON(url, ms = 8000) {
+function fetchJSON(url, ms = 5000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   return fetch(url, { signal: ctrl.signal, cache: "no-store" })
@@ -42,7 +42,7 @@ async function fetchFirstOk(urls, ms = 8000) {
   }
   throw lastErr || new Error("모든 소스 실패");
 }
-function fetchText(url, ms = 8000) {
+function fetchText(url, ms = 5000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   return fetch(url, { signal: ctrl.signal, cache: "no-store" })
@@ -168,7 +168,7 @@ function yahooFxUrls() {
   return [target, target2, ...corsProxies(target)];
 }
 async function fetchFxHistoryYahoo(backDate) {
-  const json = await fetchFirstOk(yahooFxUrls(), 15000);
+  const json = await fetchFirstOk(yahooFxUrls(), 5000);
   const r = json && json.chart && json.chart.result && json.chart.result[0];
   const closes = r && r.indicators && r.indicators.quote && r.indicators.quote[0] && r.indicators.quote[0].close;
   if (!r || !r.timestamp || !closes) throw new Error("no yahoo fx data");
@@ -182,6 +182,20 @@ async function fetchFxHistoryYahoo(backDate) {
   if (!history.length) throw new Error("빈 응답");
   return { days, history };
 }
+// 소스 여러 개를 동시에 시도해 가장 먼저 성공하는 응답을 채택(순서대로 기다리면 전부 실패 시 대기시간이 합산되어 너무 길어짐)
+function raceOk(tasks) {
+  return new Promise((resolve, reject) => {
+    let pending = tasks.length;
+    const errs = [];
+    tasks.forEach(t => {
+      Promise.resolve().then(t).then(resolve, e => {
+        errs.push((e && e.message) || String(e));
+        pending--;
+        if (pending === 0) reject(new Error(errs.join(" / ")));
+      });
+    });
+  });
+}
 async function loadFx(force) {
   fxLoaded = true;
   const card = $("#fxCard");
@@ -192,42 +206,36 @@ async function loadFx(force) {
     const iso = d => d.toISOString().slice(0, 10);
     let rate = null, days = [], history = [], prevRate = null;
     const errs = [];
+    // 1단계: 과거 기록이 있는 소스(frankfurter 기간, Yahoo FX)를 동시에 시도해 먼저 응답하는 쪽 채택
     try {
-      // 기간이 길수록(최대 3년) 응답이 커서 느릴 수 있어 타임아웃을 넉넉히 둠
-      const rangeTimeout = 8000 + FX_PERIOD_DAYS[fxPeriod] * 10;
-      const series = await fetchJSON(`https://api.frankfurter.app/${iso(back)}..${iso(today)}?from=USD&to=KRW`, rangeTimeout);
-      days = Object.keys(series.rates || {}).sort();
-      history = days.map(d => series.rates[d].KRW);
-      if (history.length) {
-        rate = history[history.length - 1];
-        prevRate = history.length > 1 ? history[history.length - 2] : null;
-      }
-    } catch (e) { errs.push("frankfurter(기간): " + e.message); }
+      const rangeTimeout = 5000 + FX_PERIOD_DAYS[fxPeriod] * 5; // 기간이 길수록(최대 3년) 응답이 커서 느릴 수 있어 타임아웃을 넉넉히 둠
+      const r = await raceOk([
+        async () => {
+          const series = await fetchJSON(`https://api.frankfurter.app/${iso(back)}..${iso(today)}?from=USD&to=KRW`, rangeTimeout);
+          const d = Object.keys(series.rates || {}).sort();
+          const h = d.map(x => series.rates[x].KRW);
+          if (!h.length) throw new Error("빈 응답");
+          return { days: d, history: h };
+        },
+        async () => {
+          const yf = await fetchFxHistoryYahoo(back);
+          if (!yf.history.length) throw new Error("빈 응답");
+          return yf;
+        }
+      ]);
+      days = r.days; history = r.history;
+      rate = history[history.length - 1];
+      prevRate = history.length > 1 ? history[history.length - 2] : null;
+    } catch (e) { errs.push("기간 조회: " + e.message); }
+    // 2단계: 1단계가 모두 실패했을 때만, 현재가만이라도 동시에 여러 소스에서 시도
     if (rate == null) {
       try {
-        const yf = await fetchFxHistoryYahoo(back);
-        days = yf.days; history = yf.history;
-        rate = history[history.length - 1];
-        prevRate = history.length > 1 ? history[history.length - 2] : null;
-      } catch (e) { errs.push("Yahoo FX: " + e.message); }
-    }
-    if (rate == null) {
-      try {
-        const cur = await fetchJSON(`https://api.frankfurter.app/latest?from=USD&to=KRW`);
-        rate = cur.rates && cur.rates.KRW;
-      } catch (e) { errs.push("frankfurter(현재): " + e.message); }
-    }
-    if (rate == null) {
-      try {
-        const alt = await fetchJSON(`https://open.er-api.com/v6/latest/USD`);
-        rate = alt.rates && alt.rates.KRW;
-      } catch (e) { errs.push("open.er-api: " + e.message); }
-    }
-    if (rate == null) {
-      try {
-        const alt2 = await fetchJSON(`https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json`);
-        rate = alt2.usd && alt2.usd.krw;
-      } catch (e) { errs.push("jsdelivr: " + e.message); }
+        rate = await raceOk([
+          async () => { const cur = await fetchJSON(`https://api.frankfurter.app/latest?from=USD&to=KRW`); const v = cur.rates && cur.rates.KRW; if (v == null) throw new Error("빈 응답"); return v; },
+          async () => { const alt = await fetchJSON(`https://open.er-api.com/v6/latest/USD`); const v = alt.rates && alt.rates.KRW; if (v == null) throw new Error("빈 응답"); return v; },
+          async () => { const alt2 = await fetchJSON(`https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json`); const v = alt2.usd && alt2.usd.krw; if (v == null) throw new Error("빈 응답"); return v; }
+        ]);
+      } catch (e) { errs.push("현재가 조회: " + e.message); }
     }
     if (rate == null) { const err = new Error("환율 조회 실패"); err.detail = errs.join(" / "); throw err; }
     fxRate = rate;
@@ -432,7 +440,7 @@ function yahooUrls(symbol) {
   return [target, target2, ...corsProxies(target)];
 }
 async function fetchQuote(symbol) {
-  const json = await fetchFirstOk(yahooUrls(symbol), 7000);
+  const json = await fetchFirstOk(yahooUrls(symbol), 5000);
   const r = json && json.chart && json.chart.result && json.chart.result[0];
   if (!r || !r.meta) throw new Error("no data");
   const price = r.meta.regularMarketPrice;
@@ -451,7 +459,7 @@ function quoteSummaryUrls(symbol) {
   return [target, target2, ...corsProxies(target)];
 }
 async function fetchDividend(symbol) {
-  const json = await fetchFirstOk(quoteSummaryUrls(symbol), 7000);
+  const json = await fetchFirstOk(quoteSummaryUrls(symbol), 5000);
   const sd = json && json.quoteSummary && json.quoteSummary.result && json.quoteSummary.result[0] && json.quoteSummary.result[0].summaryDetail;
   if (!sd) throw new Error("no dividend data");
   const y = sd.dividendYield && sd.dividendYield.raw;
@@ -826,7 +834,7 @@ async function loadCdBench(force) {
 // 렌더링되는 경우(흔함) 원문 HTML에는 숫자가 없어서 실패할 수 있음 — 그럴 땐 벤치마크로 대체.
 async function scrapeCdRates(target) {
   const urls = [...corsProxies(target), `https://r.jina.ai/${target}`];
-  const html = await fetchFirstOkText(urls, 9000);
+  const html = await fetchFirstOkText(urls, 6000);
   const text = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ");
   const re = /(\d{1,2})\s*[-]?\s*(Month|Months|Year|Years|Mo|Yr)s?\b[^%\d]{0,40}?(\d{1,2}\.\d{1,3})\s*%/gi;
   const found = [];
