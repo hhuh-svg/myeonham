@@ -777,9 +777,92 @@ function renderBondHoldings(boxId, ctrl, emptyLabel) {
   `;
   $$("[data-price]", box).forEach(inp => inp.addEventListener("change", () => { ctrl.setPrice(inp.dataset.price, inp.value); renderBondHoldings(boxId, ctrl, emptyLabel); }));
   $$("[data-del]", box).forEach(b => b.addEventListener("click", () => { ctrl.delete(b.dataset.del); renderBondHoldings(boxId, ctrl, emptyLabel); }));
+  renderBondIncome();
 }
 function renderMuniHoldings() { renderBondHoldings("muniHoldBox", muniBonds, "등록된 보유 지방채가 없습니다"); }
 function renderGovBondHoldings() { renderBondHoldings("govHoldBox", govBonds, "등록된 보유 국채가 없습니다"); }
+// ---- 머니마켓펀드(MMF): 잔액 × 7일 수익률(연)로 월 이자 계산, 월말 지급 가정 ----
+// 피델리티 MMF 계좌 캡처(2026-10-22)의 MJMXX 잔액으로 시딩. 수익률은 CNBC 자동 조회 → 실패 시 직접 입력.
+const DEFAULT_MMF = { ticker: "MJMXX", name: "JPMorgan Municipal Money Market (Morgan)", balance: 1270013.88, yield: null };
+const MMF_VERSION = 1;
+if (LS.get("mmfVersion", 0) !== MMF_VERSION) { LS.set("mmf", DEFAULT_MMF); LS.set("mmfVersion", MMF_VERSION); }
+let mmfAutoYield = null;
+function mmfGet() { return { ...DEFAULT_MMF, ...(LS.get("mmf", {}) || {}) }; }
+function mmfYield() { const m = mmfGet(); return Number.isFinite(m.yield) && m.yield > 0 ? m.yield : mmfAutoYield; }
+function renderMmf() {
+  const card = $("#mmfCard");
+  if (!card) return;
+  const m = mmfGet();
+  const y = mmfYield();
+  const manual = Number.isFinite(m.yield) && m.yield > 0;
+  const monthly = y != null ? m.balance * y / 100 / 12 : null;
+  card.innerHTML = `
+    <h2><span class="lbl">머니마켓펀드 (MMF)</span></h2>
+    <div class="bondName">${escapeHtml(m.ticker)} <span class="small" style="font-weight:400">${escapeHtml(m.name)}</span></div>
+    <div class="bondStats">
+      <div><span class="k">월 이자 예상</span><span class="v hl">${monthly != null ? "$" + fmtInt(monthly) : "—"}</span></div>
+      <div><span class="k">연 이자 예상</span><span class="v hl">${monthly != null ? "$" + fmtInt(monthly * 12) : "—"}</span></div>
+      <div><span class="k">잔액 ($)</span><input class="qtyInput" id="mmfBalance" type="number" step="0.01" inputmode="decimal" value="${m.balance}"></div>
+      <div><span class="k">7일 수익률 (연 %)</span><input class="qtyInput" id="mmfYield" type="number" step="0.01" inputmode="decimal" placeholder="${mmfAutoYield != null ? "자동 " + fmt(mmfAutoYield) : "직접 입력"}" value="${manual ? m.yield : ""}"></div>
+    </div>
+    <p class="note">${y == null ? "수익률을 자동으로 못 가져왔어요 — 피델리티 MMF 화면의 7-day yield를 입력해주세요." : (manual ? "직접 입력한 수익률 기준." : "CNBC에서 가져온 수익률 기준(직접 입력하면 그 값을 우선).")} 이자는 매일 쌓여 월말에 지급된다고 가정. 지방채 MMF라 연방세 면제.</p>
+  `;
+  $("#mmfBalance").addEventListener("change", e => { const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { LS.set("mmf", { ...mmfGet(), balance: v }); renderMmf(); renderBondIncome(); } });
+  $("#mmfYield").addEventListener("change", e => { const v = parseFloat(e.target.value); LS.set("mmf", { ...mmfGet(), yield: isFinite(v) && v > 0 ? v : null }); renderMmf(); renderBondIncome(); });
+}
+// ---- 받은 이자(월별): 보유 시작일 이후 지급일이 지난 쿠폰·MMF 이자를 "받은 것"으로 집계 ----
+function bondIncomeEvents(start, end) {
+  const events = [];
+  [[muniBonds, "muni"], [govBonds, "gov"]].forEach(([ctrl, kind]) => ctrl.load().forEach(h => {
+    const half = h.face * h.coupon / 100 / 2;
+    couponDatesInWindow(h.maturity, start, end).forEach(d => events.push({ date: d, amount: half, kind, label: h.name }));
+  }));
+  const y = mmfYield();
+  const m = mmfGet();
+  if (y != null && m.balance > 0) {
+    for (let d = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0)); d < end; d = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 2, 0))) {
+      if (d >= start) events.push({ date: d, amount: m.balance * y / 100 / 12, kind: "mmf", label: m.ticker });
+    }
+  }
+  return events.sort((a, b) => a.date - b.date);
+}
+function renderBondIncome() {
+  const card = $("#bondIncomeCard");
+  if (!card) return;
+  const start = holdStartDate();
+  const today = todayUTC();
+  const yearEnd = new Date(Date.UTC(today.getUTCFullYear() + 1, 0, 1));
+  const end = yearEnd > start ? yearEnd : addMonthsUTC(start, 12);
+  const events = bondIncomeEvents(start, end);
+  const thisYear = today.getUTCFullYear();
+  const recYear = events.filter(e => e.date <= today && e.date.getUTCFullYear() === thisYear).reduce((s, e) => s + e.amount, 0);
+  const upYear = events.filter(e => e.date > today && e.date.getUTCFullYear() === thisYear).reduce((s, e) => s + e.amount, 0);
+  const months = [];
+  for (let m = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1)); m < end; m = addMonthsUTC(m, 1)) {
+    const key = monthKey(m);
+    const evs = events.filter(e => monthKey(e.date) === key);
+    months.push({ key, future: m > today, total: evs.reduce((s, e) => s + e.amount, 0), events: evs });
+  }
+  const max = Math.max(1, ...months.map(x => x.total));
+  const kindLabel = { muni: "지방채", gov: "국채", mmf: "MMF" };
+  card.innerHTML = `
+    <h2><span class="lbl">받은 이자 (월별, 세전)</span></h2>
+    <div class="incGrid">
+      <div><span class="k">${thisYear}년 받은 누계</span><span class="v" style="color:var(--accent);font-weight:700">$${fmtInt(recYear)}</span></div>
+      <div><span class="k">${thisYear}년 남은 예정</span><span class="v">$${fmtInt(upYear)}</span></div>
+      <div><span class="k">${thisYear}년 합계</span><span class="v">$${fmtInt(recYear + upYear)}</span></div>
+    </div>
+    <div class="row" style="margin:10px 0 4px;align-items:center;gap:8px"><span class="small">보유 시작일</span><input class="qtyInput" id="holdStartInput" type="date" value="${holdStartISO()}"></div>
+    ${months.map(x => `<div class="incRow"${x.future ? ' style="opacity:.6"' : ""}>
+      <div class="m">${x.key}${x.future ? `<br><span style="font-size:10px">예정</span>` : ""}</div>
+      <div class="incBar"><i style="width:${Math.round(x.total / max * 100)}%"></i></div>
+      <div class="amt">$${fmtInt(x.total)}</div>
+      ${x.events.length ? `<div class="incSub">${x.events.map(e => `${fmtDateShort(isoDate(e.date)).slice(5)} ${kindLabel[e.kind]} ${escapeHtml(e.label)} $${fmtInt(e.amount)}`).join(" · ")}</div>` : ""}
+    </div>`).join("")}
+    <p class="note">실제 입금 내역이 아니라 쿠폰 일정(만기 월·일 기준 반기 지급 가정)과 MMF 월말 지급 가정으로 계산한 값입니다. 보유 시작일 이후 지급일이 지난 건을 "받은 것"으로 칩니다.</p>
+  `;
+  $("#holdStartInput").addEventListener("change", e => { if (/^\d{4}-\d{2}-\d{2}$/.test(e.target.value)) { LS.set("holdStart", e.target.value); renderBondIncome(); } });
+}
 function muniSkeleton() {
   paneMuni.innerHTML = `
     <div class="card">
@@ -823,6 +906,8 @@ function muniSkeleton() {
       </div>
       <p class="note">지방채와 달리 이자소득이 연방·주 소득세 모두 과세대상입니다(주세는 면제인 경우가 많음).</p>
     </div>
+    <div class="card" id="mmfCard"></div>
+    <div class="card" id="bondIncomeCard"></div>
     <div class="card" id="treasCard">
       <h2><span class="lbl">국채 고시 금리</span></h2>
       <div class="status">불러오는 중…</div>
@@ -865,6 +950,8 @@ function muniSkeleton() {
   });
   renderMuniHoldings();
   renderGovBondHoldings();
+  renderMmf();
+  renderBondIncome();
 }
 // 미 재무부 고시 일별 수익률 곡선(CSV, 최신 영업일이 첫 줄). 막히면 Yahoo/CNBC 벤치마크(3개월·5년·10년·30년)로 대체
 const TREASURY_TENORS = [["1 Mo", "1개월"], ["3 Mo", "3개월"], ["6 Mo", "6개월"], ["1 Yr", "1년"], ["2 Yr", "2년"], ["5 Yr", "5년"], ["10 Yr", "10년"], ["20 Yr", "20년"], ["30 Yr", "30년"]];
@@ -903,6 +990,11 @@ function renderTreasury() {
 }
 async function loadMuniBench(force) {
   benchLoadedFor.muni = true;
+  // MMF 7일 수익률 자동 조회(CNBC의 dividendyield) — 재무부 금리표와 동시에 진행
+  fetchQuotesCnbc([mmfGet().ticker]).then(q => {
+    const d = q[mmfGet().ticker] && q[mmfGet().ticker].div;
+    if (d && d.yield != null && d.yield > 0) { mmfAutoYield = d.yield; renderMmf(); renderBondIncome(); }
+  }).catch(() => {});
   try {
     const t = await fetchTreasuryOfficial();
     treasuryData = { src: t.src, date: t.date, rows: TREASURY_TENORS.map(([k, label]) => ({ label, val: t.rates[k] ?? null })) };
@@ -918,19 +1010,13 @@ async function loadMuniBench(force) {
 }
 
 // =========================================================
-// 5) 배당·이자 현황: 보유 ETF·주식 배당(지난 1년 실제 지급 내역 기준) + 지방채·국채 쿠폰을 월별로 합산
+// 5) 배당 현황: 보유 주식·ETF 배당만(지난 1년 실제 지급 내역 기준 예상). 채권 이자는 채권 탭에서 계산.
 // =========================================================
 const paneIncome = $("#pane-income");
-function incomeSkeleton() {
-  paneIncome.innerHTML = `
-    <div class="card" id="incSummary"><h2><span class="lbl">월 평균 예상 수입 (세전)</span></h2><div class="status">불러오는 중…</div></div>
-    <div class="card" id="incMonths"><h2><span class="lbl">앞으로 12개월 월별 예상</span></h2><div class="status">불러오는 중…</div></div>
-    <div class="card" id="incSources"><h2><span class="lbl">종목별 연간 예상 (세전)</span></h2><div class="status">불러오는 중…</div></div>
-    <div class="row"><button class="btn sm" id="incRefresh">새로고침</button></div>
-    <p class="disclaim">ETF·주식 배당은 지난 1년 실제 지급 내역(날짜·주당 금액)이 다음 1년에도 그대로 반복된다고 가정하고 보유수량을 곱한 추정치입니다. 채권 쿠폰은 만기 월·일 기준 6개월 간격 지급 가정. 전부 세전이며 지방채 이자는 연방세 면제입니다. 수량은 ETF 탭에서, 채권은 채권 탭에서 고칠 수 있어요.</p>
-  `;
-  $("#incRefresh").addEventListener("click", () => loadIncome(true));
-}
+const DEFAULT_HOLD_START = "2026-09-01"; // 사용자: "올해 9월부터 보유했다고 가정"
+function holdStartISO() { return LS.get("holdStart", DEFAULT_HOLD_START); }
+function holdStartDate() { const [y, m, d] = holdStartISO().split("-").map(Number); return new Date(Date.UTC(y, m - 1, d)); }
+function todayUTC() { const n = new Date(); return new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate())); }
 function monthKey(d) { return `${d.getUTCFullYear()}.${String(d.getUTCMonth() + 1).padStart(2, "0")}`; }
 function addMonthsUTC(d, n) { return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + n, d.getUTCDate())); }
 // 만기 월/일 기준 6개월 간격 쿠폰일 중 [start, end) 구간에 드는 날짜들(만기 이후는 제외)
@@ -946,20 +1032,24 @@ function couponDatesInWindow(maturityISO, start, end) {
   }
   return out.sort((a, b) => a - b);
 }
+function incomeSkeleton() {
+  paneIncome.innerHTML = `
+    <div class="card" id="incSummary"><h2><span class="lbl">보유 주식·ETF 예상 배당 (세전)</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="card" id="incMonths"><h2><span class="lbl">앞으로 12개월 월별 예상</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="card" id="incSources"><h2><span class="lbl">종목별 연간 예상</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="row"><button class="btn sm" id="incRefresh">새로고침</button></div>
+    <p class="disclaim">지난 1년 실제 배당 지급 내역(날짜·주당 금액)이 다음 1년에도 그대로 반복된다고 가정하고 보유수량을 곱한 추정치입니다(세전). 지급 내역을 못 가져온 종목은 연배당률을 12개월로 나눠 추정. 수량은 ETF 탭에서 고칠 수 있고, 채권 이자는 채권 탭에서 따로 계산합니다.</p>
+  `;
+  $("#incRefresh").addEventListener("click", () => loadIncome(true));
+}
 function computeIncome(etfData) {
-  const now = new Date();
-  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const today = todayUTC();
+  const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
   const end = addMonthsUTC(start, 12);
+  const holdStart = holdStartDate();
   const events = [];
   const sources = [];
-  [[muniBonds, "muni", "지방채"], [govBonds, "gov", "국채"]].forEach(([ctrl, kind, kindLabel]) => {
-    ctrl.load().forEach(h => {
-      const half = h.face * h.coupon / 100 / 2;
-      couponDatesInWindow(h.maturity, start, end).forEach(d => events.push({ date: d, amount: half, kind, label: h.name }));
-      sources.push({ kind, label: h.name, annual: h.face * h.coupon / 100, detail: `${kindLabel} · 쿠폰 ${fmt(h.coupon, 3)}% · 반기마다 $${fmt(half, 2)}` });
-    });
-  });
-  let etfFailed = 0;
+  let etfFailed = 0, noHistory = 0, receivedYear = 0;
   LS.get("etfSymbols", DEFAULT_ETFS).forEach(sym => {
     const qty = parseFloat(getEtfQty(sym));
     if (!qty) return;
@@ -969,75 +1059,65 @@ function computeIncome(etfData) {
     if (hist.length) {
       hist.forEach(e => {
         const [y, m, dd] = e.date.split("-").map(Number);
+        const paid = new Date(Date.UTC(y, m - 1, dd));
+        if (paid >= holdStart && paid <= today && paid.getUTCFullYear() === today.getUTCFullYear()) receivedYear += e.amount * qty;
         const proj = new Date(Date.UTC(y + 1, m - 1, dd));
-        if (proj >= start && proj < end) events.push({ date: proj, amount: e.amount * qty, kind: "div", label: sym });
+        if (proj >= start && proj < end) events.push({ date: proj, amount: e.amount * qty, label: sym });
       });
       const perShare = hist.reduce((s, e) => s + e.amount, 0);
       const n = hist.length;
       const freq = n >= 11 ? "월배당" : n >= 4 ? "분기배당" : n === 2 ? "반기배당" : n === 1 ? "연 1회" : `연 ${n}회`;
-      sources.push({ kind: "div", label: sym, annual: perShare * qty, detail: `${freq} · 주당 연 $${fmt(perShare, 3)} × ${qty}주` });
+      sources.push({ label: sym, annual: perShare * qty, detail: `${freq} · 주당 연 $${fmt(perShare, 3)} × ${qty}주` });
     } else if (d.div && d.div.rate) {
-      // 지급 내역은 없고 연배당률만 있는 경우: 12개월에 균등 분배(추정)
-      for (let i = 0; i < 12; i++) events.push({ date: addMonthsUTC(start, i), amount: d.div.rate * qty / 12, kind: "div", label: sym });
-      sources.push({ kind: "div", label: sym, annual: d.div.rate * qty, detail: `연배당 $${fmt(d.div.rate)}/주 × ${qty}주 (월 균등 추정)` });
+      noHistory++;
+      for (let i = 0; i < 12; i++) events.push({ date: addMonthsUTC(start, i), amount: d.div.rate * qty / 12, label: sym });
+      sources.push({ label: sym, annual: d.div.rate * qty, detail: `연배당 $${fmt(d.div.rate)}/주 × ${qty}주 (월 균등 추정)` });
     }
   });
   const months = [];
   for (let i = 0; i < 12; i++) {
     const key = monthKey(addMonthsUTC(start, i));
     const evs = events.filter(e => monthKey(e.date) === key).sort((a, b) => a.date - b.date);
-    const by = { div: 0, muni: 0, gov: 0 };
-    evs.forEach(e => { by[e.kind] += e.amount; });
-    months.push({ key, total: by.div + by.muni + by.gov, by, events: evs });
+    months.push({ key, total: evs.reduce((s, e) => s + e.amount, 0), events: evs });
   }
-  return { months, sources: sources.filter(s => s.annual > 0).sort((a, b) => b.annual - a.annual), etfFailed };
+  return { months, sources: sources.filter(s => s.annual > 0).sort((a, b) => b.annual - a.annual), etfFailed, noHistory, receivedYear };
 }
 function renderIncome(etfData, pending) {
   const r = computeIncome(etfData);
   const total12 = r.months.reduce((s, m) => s + m.total, 0);
-  const byKind = { div: 0, muni: 0, gov: 0 };
-  r.months.forEach(m => { byKind.div += m.by.div; byKind.muni += m.by.muni; byKind.gov += m.by.gov; });
-  const note = pending
-    ? `<div class="small" style="margin-top:8px">ETF·주식 배당 정보 불러오는 중… (채권 이자는 먼저 계산됨)</div>`
-    : (r.etfFailed ? `<div class="small" style="margin-top:8px;color:var(--danger)">ETF·주식 ${r.etfFailed}개 조회 실패 — 그 종목 배당은 빠져 있어요. 새로고침으로 다시 시도.</div>` : "");
+  const notes = [];
+  if (pending) notes.push("시세·배당 정보 불러오는 중…");
+  if (!pending && r.etfFailed) notes.push(`<span style="color:var(--danger)">${r.etfFailed}개 종목 조회 실패 — 그 종목 배당은 빠져 있어요.</span>`);
+  if (!pending && r.noHistory) notes.push(`${r.noHistory}개 종목은 지급 내역을 못 가져와 연배당률 ÷ 12로 추정했어요.`);
   $("#incSummary").innerHTML = `
-    <h2><span class="lbl">월 평균 예상 수입 (세전)</span></h2>
-    <div class="incBig">$${fmtInt(total12 / 12)}<span class="small" style="margin-left:6px;color:var(--muted)">/월</span></div>
+    <h2><span class="lbl">보유 주식·ETF 예상 배당 (세전)</span></h2>
+    <div class="incBig">$${fmtInt(total12 / 12)}<span class="small" style="margin-left:6px;color:var(--muted)">/월 평균</span></div>
     <div class="incGrid">
       <div><span class="k">12개월 합계</span><span class="v">$${fmtInt(total12)}</span></div>
       <div><span class="k">이번 달</span><span class="v">$${fmtInt(r.months[0].total)}</span></div>
       <div><span class="k">다음 달</span><span class="v">$${fmtInt(r.months[1].total)}</span></div>
     </div>
-    <div class="incGrid">
-      <div><span class="k">ETF·주식 배당</span><span class="v">$${fmtInt(byKind.div)}</span></div>
-      <div><span class="k">지방채 이자</span><span class="v">$${fmtInt(byKind.muni)}</span></div>
-      <div><span class="k">국채 이자</span><span class="v">$${fmtInt(byKind.gov)}</span></div>
+    <div class="incGrid" style="grid-template-columns:1fr">
+      <div><span class="k">올해 받은 배당 (${fmtDateShort(holdStartISO())} 보유 시작 가정, 지급 내역 기준)</span><span class="v">$${fmtInt(r.receivedYear)}</span></div>
     </div>
-    ${note}
+    ${notes.length ? `<div class="small" style="margin-top:8px">${notes.join("<br>")}</div>` : ""}
   `;
   const max = Math.max(1, ...r.months.map(m => m.total));
   $("#incMonths").innerHTML = `
     <h2><span class="lbl">앞으로 12개월 월별 예상</span></h2>
-    ${r.months.map(m => {
-      const parts = [];
-      if (m.by.div) parts.push(`배당 $${fmtInt(m.by.div)}`);
-      if (m.by.muni) parts.push(`지방채 $${fmtInt(m.by.muni)}`);
-      if (m.by.gov) parts.push(`국채 $${fmtInt(m.by.gov)}`);
-      const detail = m.events.map(e => `${escapeHtml(e.label)} $${fmtInt(e.amount)}`).join(" · ");
-      return `<div class="incRow">
+    ${r.months.map(m => `<div class="incRow">
         <div class="m">${m.key}</div>
         <div class="incBar"><i style="width:${Math.round(m.total / max * 100)}%"></i></div>
         <div class="amt">$${fmtInt(m.total)}</div>
-        ${m.events.length ? `<div class="incSub">${parts.join(" · ")}<br>${detail}</div>` : ""}
-      </div>`;
-    }).join("")}
+        ${m.events.length ? `<div class="incSub">${m.events.map(e => `${escapeHtml(e.label)} $${fmtInt(e.amount)}`).join(" · ")}</div>` : ""}
+      </div>`).join("")}
   `;
   $("#incSources").innerHTML = `
-    <h2><span class="lbl">종목별 연간 예상 (세전)</span></h2>
+    <h2><span class="lbl">종목별 연간 예상</span></h2>
     ${r.sources.length ? r.sources.map((s, i) => `<div class="etfRow" style="grid-template-columns:1fr auto;${i === 0 ? "border-top:0" : ""}">
       <div><div class="sym">${escapeHtml(s.label)}</div><div class="nm">${escapeHtml(s.detail)}</div></div>
       <div class="px" style="text-align:right">$${fmtInt(s.annual)}<div class="small">월 $${fmtInt(s.annual / 12)}</div></div>
-    </div>`).join("") : `<div class="small">계산할 수 있는 종목이 아직 없습니다. ETF 탭에서 보유수량을 입력해주세요.</div>`}
+    </div>`).join("") : `<div class="small">${pending ? "불러오는 중…" : "배당 정보가 있는 보유 종목이 없습니다. ETF 탭에서 보유수량을 확인해주세요."}</div>`}
   `;
 }
 async function loadIncome(force) {
