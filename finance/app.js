@@ -514,15 +514,34 @@ if (LS.get("muniHoldingsVersion", 0) !== MUNI_HOLDINGS_VERSION) {
   LS.set("muniHoldings", DEFAULT_MUNI_HOLDINGS);
   LS.set("muniHoldingsVersion", MUNI_HOLDINGS_VERSION);
 }
-function loadMuniHoldings() { return LS.get("muniHoldings", DEFAULT_MUNI_HOLDINGS); }
-function setMuniPrice(cusip, val) {
-  const list = loadMuniHoldings();
-  const h = list.find(x => x.cusip === cusip);
-  const n = parseFloat(val);
-  if (h && isFinite(n)) { h.price = n; LS.set("muniHoldings", list); }
+// 지방채·국채 보유현황 공용 컨트롤러 (CUSIP 기준 저장/수정/삭제)
+function createBondHoldings(storageKey, defaultData) {
+  const load = () => LS.get(storageKey, defaultData);
+  return {
+    load,
+    setPrice(cusip, val) {
+      const list = load();
+      const h = list.find(x => x.cusip === cusip);
+      const n = parseFloat(val);
+      if (h && isFinite(n)) { h.price = n; LS.set(storageKey, list); }
+    },
+    delete(cusip) { LS.set(storageKey, load().filter(x => x.cusip !== cusip)); },
+    add(h) { const list = load(); list.push(h); LS.set(storageKey, list); }
+  };
 }
-function deleteMuniHolding(cusip) { LS.set("muniHoldings", loadMuniHoldings().filter(x => x.cusip !== cusip)); }
-function addMuniHolding(h) { const list = loadMuniHoldings(); list.push(h); LS.set("muniHoldings", list); }
+const muniBonds = createBondHoldings("muniHoldings", DEFAULT_MUNI_HOLDINGS);
+// 보유 미국채(국채) — 지방채와 달리 과세대상. 피델리티 포지션 화면에서 받은 데이터로 시딩(2026-10-21)
+const DEFAULT_GOV_BOND_HOLDINGS = [
+  { cusip: "912810TW8", name: "UNITED STATES TREAS SER BON", coupon: 4.750, maturity: "2043-11-15", face: 230000, price: 92.371 },
+  { cusip: "912810TZ1", name: "UNITED STATES TREAS SER BON", coupon: 4.500, maturity: "2044-02-15", face: 107000, price: 89.34 },
+  { cusip: "912810UN6", name: "UNITED STATES TREAS SER BON", coupon: 4.875, maturity: "2045-08-15", face: 10000, price: 92.867 }
+];
+const GOV_BOND_VERSION = 1;
+if (LS.get("govBondVersion", 0) !== GOV_BOND_VERSION) {
+  LS.set("govBondHoldings", DEFAULT_GOV_BOND_HOLDINGS);
+  LS.set("govBondVersion", GOV_BOND_VERSION);
+}
+const govBonds = createBondHoldings("govBondHoldings", DEFAULT_GOV_BOND_HOLDINGS);
 function isoDate(d) { return d.toISOString().slice(0, 10); }
 function daysUntil(d) { const t0 = new Date(); const t = new Date(Date.UTC(t0.getUTCFullYear(), t0.getUTCMonth(), t0.getUTCDate())); return Math.round((d.getTime() - t.getTime()) / 86400000); }
 // 공시된 다음 쿠폰일이 없을 때, 만기 월/일 기준 6개월 간격 지급을 가정해 다음 지급일을 추정
@@ -539,11 +558,11 @@ function nextCouponDate(maturityISO) {
   const future = candidates.filter(d => d.getTime() > today.getTime()).sort((a, b) => a - b);
   return future[0] || null;
 }
-function renderMuniHoldings() {
-  const box = $("#muniHoldBox");
+function renderBondHoldings(boxId, ctrl, emptyLabel) {
+  const box = $("#" + boxId);
   if (!box) return;
-  const list = loadMuniHoldings();
-  if (!list.length) { box.innerHTML = `<div class="empty2">등록된 보유 지방채가 없습니다</div>`; return; }
+  const list = ctrl.load();
+  if (!list.length) { box.innerHTML = `<div class="empty2">${emptyLabel}</div>`; return; }
   const enriched = list.map(h => {
     const nc = nextCouponDate(h.maturity);
     return { ...h, nc, amt: h.face * h.coupon / 100 / 2, mv: h.face * h.price / 100 };
@@ -563,15 +582,17 @@ function renderMuniHoldings() {
         <div class="bondFoot">
           <span class="small">액면 $${fmtInt(h.face)} · 가격</span>
           <input class="qtyInput" data-price="${escapeHtml(h.cusip)}" type="number" step="0.001" value="${h.price}">
-          <button class="delbtn" data-delmuni="${escapeHtml(h.cusip)}" style="margin-left:auto">삭제</button>
+          <button class="delbtn" data-del="${escapeHtml(h.cusip)}" style="margin-left:auto">삭제</button>
         </div>
       </div>
     `).join("")}
     <p class="note">쿠폰 지급일은 만기 월·일을 기준으로 6개월 간격 지급을 가정한 추정값입니다 — 실제 발행조건과 다를 수 있습니다. 가격은 직접 확인해서 가끔 업데이트해주세요(자동조회 불가).</p>
   `;
-  $$("[data-price]", box).forEach(inp => inp.addEventListener("change", () => { setMuniPrice(inp.dataset.price, inp.value); renderMuniHoldings(); }));
-  $$("[data-delmuni]", box).forEach(b => b.addEventListener("click", () => { deleteMuniHolding(b.dataset.delmuni); renderMuniHoldings(); }));
+  $$("[data-price]", box).forEach(inp => inp.addEventListener("change", () => { ctrl.setPrice(inp.dataset.price, inp.value); renderBondHoldings(boxId, ctrl, emptyLabel); }));
+  $$("[data-del]", box).forEach(b => b.addEventListener("click", () => { ctrl.delete(b.dataset.del); renderBondHoldings(boxId, ctrl, emptyLabel); }));
 }
+function renderMuniHoldings() { renderBondHoldings("muniHoldBox", muniBonds, "등록된 보유 지방채가 없습니다"); }
+function renderGovBondHoldings() { renderBondHoldings("govHoldBox", govBonds, "등록된 보유 국채가 없습니다"); }
 function muniSkeleton() {
   const c = LS.get("muniCalc", { fed: "32", state: "0", src: "irx", custom: "", check: "" });
   paneMuni.innerHTML = `
@@ -594,6 +615,27 @@ function muniSkeleton() {
           <button class="btn sm primary" id="hSave">저장</button>
         </div>
       </div>
+    </div>
+    <div class="card">
+      <h2>보유 국채 (미국채, 과세대상)</h2>
+      <div id="govHoldBox"></div>
+      <div class="row" style="margin-top:10px"><button class="btn sm" id="govHoldAddBtn">+ 종목 추가</button></div>
+      <div class="logform" id="govHoldForm">
+        <input id="gName" placeholder="종목명">
+        <div class="two">
+          <input id="gCusip" placeholder="CUSIP" maxlength="9" style="text-transform:uppercase">
+          <input id="gMaturity" type="date" placeholder="만기일">
+        </div>
+        <div class="two">
+          <input id="gCoupon" type="number" step="0.001" placeholder="쿠폰금리(%)">
+          <input id="gFace" type="number" step="1" placeholder="액면가($)">
+        </div>
+        <div class="two">
+          <input id="gPrice" type="number" step="0.001" placeholder="현재가(100당)">
+          <button class="btn sm primary" id="gSave">저장</button>
+        </div>
+      </div>
+      <p class="note">지방채와 달리 이자소득이 연방·주 소득세 모두 과세대상입니다(주세는 면제인 경우가 많음).</p>
     </div>
     <div class="card calc">
       <h2>매수 기준선 (자동 계산)</h2>
@@ -636,12 +678,29 @@ function muniSkeleton() {
     if (!name || !cusip || !isFinite(coupon) || !isFinite(face) || !isFinite(price) || !maturity) {
       toast("모든 항목을 입력하세요"); return;
     }
-    addMuniHolding({ cusip, name, coupon, maturity, face, price });
+    muniBonds.add({ cusip, name, coupon, maturity, face, price });
     ["hName", "hCusip", "hMaturity", "hCoupon", "hFace", "hPrice"].forEach(id => $("#" + id).value = "");
     $("#muniHoldForm").classList.remove("open");
     renderMuniHoldings();
   });
+  $("#govHoldAddBtn").addEventListener("click", () => $("#govHoldForm").classList.toggle("open"));
+  $("#gSave").addEventListener("click", () => {
+    const name = $("#gName").value.trim();
+    const cusip = $("#gCusip").value.trim().toUpperCase();
+    const coupon = parseFloat($("#gCoupon").value);
+    const face = parseFloat($("#gFace").value);
+    const price = parseFloat($("#gPrice").value);
+    const maturity = $("#gMaturity").value;
+    if (!name || !cusip || !isFinite(coupon) || !isFinite(face) || !isFinite(price) || !maturity) {
+      toast("모든 항목을 입력하세요"); return;
+    }
+    govBonds.add({ cusip, name, coupon, maturity, face, price });
+    ["gName", "gCusip", "gMaturity", "gCoupon", "gFace", "gPrice"].forEach(id => $("#" + id).value = "");
+    $("#govHoldForm").classList.remove("open");
+    renderGovBondHoldings();
+  });
   renderMuniHoldings();
+  renderGovBondHoldings();
 }
 function muniThreshold() {
   const fed = parseFloat($("#mFed").value) || 0;
