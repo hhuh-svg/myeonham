@@ -35,13 +35,6 @@ function fetchJSON(url, ms = 5000) {
     .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .finally(() => clearTimeout(t));
 }
-async function fetchFirstOk(urls, ms = 8000) {
-  let lastErr;
-  for (const u of urls) {
-    try { return await fetchJSON(u, ms); } catch (e) { lastErr = e; }
-  }
-  throw lastErr || new Error("모든 소스 실패");
-}
 function fetchText(url, ms = 5000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
@@ -49,10 +42,35 @@ function fetchText(url, ms = 5000) {
     .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); })
     .finally(() => clearTimeout(t));
 }
-async function fetchFirstOkText(urls, ms = 8000) {
+// 소스 여러 개를 동시에 시도해 가장 먼저 성공하는 응답을 채택(순서대로 기다리면 전부 실패 시 대기시간이 합산되어 너무 길어짐)
+function raceOk(tasks) {
+  return new Promise((resolve, reject) => {
+    let pending = tasks.length;
+    const errs = [];
+    tasks.forEach(t => {
+      Promise.resolve().then(t).then(resolve, e => {
+        errs.push((e && e.message) || String(e));
+        pending--;
+        if (pending === 0) reject(new Error(errs.join(" / ")));
+      });
+    });
+  });
+}
+// tiers: [[같은 단계 소스...], [다음 단계 소스...], ...]. 한 단계 안에서는 동시에 시도하고,
+// 그 단계가 전부 실패해야만 다음 단계로 넘어감(직접호출이 되면 프록시는 아예 타지 않음).
+async function fetchFirstOk(tiers, ms = 5000) {
   let lastErr;
-  for (const u of urls) {
-    try { return await fetchText(u, ms); } catch (e) { lastErr = e; }
+  for (const tier of tiers) {
+    try { return await raceOk(tier.map(u => () => fetchJSON(u, ms))); }
+    catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error("모든 소스 실패");
+}
+async function fetchFirstOkText(tiers, ms = 5000) {
+  let lastErr;
+  for (const tier of tiers) {
+    try { return await raceOk(tier.map(u => () => fetchText(u, ms))); }
+    catch (e) { lastErr = e; }
   }
   throw lastErr || new Error("모든 소스 실패");
 }
@@ -165,7 +183,7 @@ let fxPeriod = LS.get("fxPeriod", "1m");
 function yahooFxUrls() {
   const target = `https://query1.finance.yahoo.com/v8/finance/chart/USDKRW=X?interval=1d&range=5y`;
   const target2 = `https://query2.finance.yahoo.com/v8/finance/chart/USDKRW=X?interval=1d&range=5y`;
-  return [target, target2, ...corsProxies(target)];
+  return [[target, target2], corsProxies(target)];
 }
 async function fetchFxHistoryYahoo(backDate) {
   const json = await fetchFirstOk(yahooFxUrls(), 5000);
@@ -181,20 +199,6 @@ async function fetchFxHistoryYahoo(backDate) {
   });
   if (!history.length) throw new Error("빈 응답");
   return { days, history };
-}
-// 소스 여러 개를 동시에 시도해 가장 먼저 성공하는 응답을 채택(순서대로 기다리면 전부 실패 시 대기시간이 합산되어 너무 길어짐)
-function raceOk(tasks) {
-  return new Promise((resolve, reject) => {
-    let pending = tasks.length;
-    const errs = [];
-    tasks.forEach(t => {
-      Promise.resolve().then(t).then(resolve, e => {
-        errs.push((e && e.message) || String(e));
-        pending--;
-        if (pending === 0) reject(new Error(errs.join(" / ")));
-      });
-    });
-  });
 }
 async function loadFx(force) {
   fxLoaded = true;
@@ -434,10 +438,11 @@ function renderEtfRows(syms, data) {
   }));
 }
 let lastEtfData = {};
+// ETF는 심볼 여러 개를 동시에 조회하므로 query1/query2를 둘 다 쏘면 호스트당 연결 수가
+// 두 배로 늘어 다른 요청이 줄서는 문제가 재발함 — 여기선 직접호출 1개 + 실패 시 프록시 2개만 race
 function yahooUrls(symbol) {
   const target = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1y&events=div`;
-  const target2 = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1y&events=div`;
-  return [target, target2, ...corsProxies(target)];
+  return [[target], corsProxies(target)];
 }
 async function fetchQuote(symbol) {
   const json = await fetchFirstOk(yahooUrls(symbol), 5000);
@@ -455,8 +460,7 @@ async function fetchQuote(symbol) {
 }
 function quoteSummaryUrls(symbol) {
   const target = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=summaryDetail`;
-  const target2 = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=summaryDetail`;
-  return [target, target2, ...corsProxies(target)];
+  return [[target], corsProxies(target)];
 }
 async function fetchDividend(symbol) {
   const json = await fetchFirstOk(quoteSummaryUrls(symbol), 5000);
@@ -833,8 +837,8 @@ async function loadCdBench(force) {
 // 은행/증권사 공개 CD 페이지에서 금리표를 직접 긁어오는 시도. 로그인 없이 보이는 화면이 JS로
 // 렌더링되는 경우(흔함) 원문 HTML에는 숫자가 없어서 실패할 수 있음 — 그럴 땐 벤치마크로 대체.
 async function scrapeCdRates(target) {
-  const urls = [...corsProxies(target), `https://r.jina.ai/${target}`];
-  const html = await fetchFirstOkText(urls, 6000);
+  const tiers = [corsProxies(target), [`https://r.jina.ai/${target}`]];
+  const html = await fetchFirstOkText(tiers, 6000);
   const text = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ");
   const re = /(\d{1,2})\s*[-]?\s*(Month|Months|Year|Years|Mo|Yr)s?\b[^%\d]{0,40}?(\d{1,2}\.\d{1,3})\s*%/gi;
   const found = [];
@@ -900,8 +904,8 @@ function newsSkeleton() {
   $("#newsRefresh").addEventListener("click", () => loadNews(true));
 }
 async function fetchFeed(url, ms = 5000) {
-  const urls = [url, ...corsProxies(url)];
-  const xml = await fetchFirstOkText(urls, ms);
+  const tiers = [[url], corsProxies(url)];
+  const xml = await fetchFirstOkText(tiers, ms);
   const doc = new DOMParser().parseFromString(xml, "application/xml");
   if (doc.querySelector("parsererror")) throw new Error("feed parse error");
   return doc;
@@ -930,7 +934,7 @@ function timeAgo(pubDateStr) {
 async function translateToKo(text) {
   if (!text) return "";
   const target = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=${encodeURIComponent(text)}`;
-  const json = await fetchFirstOk([target, ...corsProxies(target)], 6000);
+  const json = await fetchFirstOk([[target], corsProxies(target)], 6000);
   if (!Array.isArray(json) || !Array.isArray(json[0])) throw new Error("번역 응답 형식 오류");
   return json[0].map(seg => seg[0]).join("");
 }
