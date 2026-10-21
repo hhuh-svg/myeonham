@@ -542,7 +542,8 @@ async function fetchQuotesCnbc(symbols) {
     const q = arr.find(x => x && x.symbol && String(x.symbol).toUpperCase() === list[i].toUpperCase()) || (arr.length === symbols.length ? arr[i] : null);
     const price = q && numLoose(q.last);
     if (price == null) return;
-    const rate = numLoose(q.dividend), yld = numLoose(q.dividendyield);
+    const rate = numLoose(q.dividend ?? q.dividend_amount ?? q.annual_dividend);
+    const yld = numLoose(q.dividendyield ?? q.dividend_yield ?? q.yield);
     out[orig] = { price, pct: numLoose(q.change_pct), name: q.name || "", divHistory: [], src: "CNBC" };
     if (rate != null || yld != null) out[orig].div = { rate, yield: yld };
   });
@@ -908,12 +909,16 @@ function muniSkeleton() {
     </div>
     <div class="card" id="mmfCard"></div>
     <div class="card" id="bondIncomeCard"></div>
+    <div class="card" id="muniRateCard">
+      <h2><span class="lbl">지방채 수익률 (AAA 등급)</span></h2>
+      <div class="status">불러오는 중…</div>
+    </div>
     <div class="card" id="treasCard">
       <h2><span class="lbl">국채 고시 금리</span></h2>
       <div class="status">불러오는 중…</div>
     </div>
     <div class="row"><button class="btn sm" id="muniRefresh">금리 새로고침</button></div>
-    <p class="disclaim">지방채는 공개로 고시되는 금리표가 없어서(발행처·만기·등급마다 제각각) 매물별 수익률은 <a href="https://www.fidelity.com/fixed-income-bonds/municipal-bonds" target="_blank" rel="noopener">피델리티 지방채 화면 ↗</a>에서 확인해주세요. 국채 금리는 미 재무부가 매 영업일 고시하는 수익률 곡선입니다.</p>
+    <p class="disclaim">국채 금리는 미 재무부가 매 영업일 고시하는 수익률 곡선, 지방채 수익률은 딜러 공개 자료 기준입니다. 개별 지방채 매물은 <a href="https://www.fidelity.com/fixed-income-bonds/municipal-bonds" target="_blank" rel="noopener">피델리티 지방채 화면 ↗</a>에서 확인해주세요.</p>
   `;
   $("#muniRefresh").addEventListener("click", () => loadMuniBench(true));
   $("#muniHoldAddBtn").addEventListener("click", () => $("#muniHoldForm").classList.toggle("open"));
@@ -973,6 +978,41 @@ async function fetchTreasuryOfficial() {
   }
   throw new Error("재무부 금리표 없음");
 }
+// 지방채는 국채처럼 정부가 고시하는 금리가 없음. 가장 가까운 공개 자료는 지방채 전문 딜러 FMSbonds가
+// 매일 올리는 AAA 등급 지방채 수익률 곡선(정적 페이지, 프록시 경유). 페이지 구조가 바뀌면 실패할 수 있음.
+async function fetchMuniCurve() {
+  const target = "https://www.fmsbonds.com/market-yields/";
+  const html = await fetchFirstOkText([corsProxies(target)], 10000);
+  const text = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ");
+  const re = /(\d{1,2})\s*[-]?\s*(Year|Yr)s?\b[^%\d]{0,30}?(\d{1,2}\.\d{1,3})\s*%/gi;
+  const rows = [];
+  const seen = new Set();
+  let m;
+  while ((m = re.exec(text)) && rows.length < 15) {
+    const t = parseInt(m[1], 10);
+    if (seen.has(t)) continue;
+    seen.add(t);
+    rows.push({ years: t, label: t + "년", val: parseFloat(m[3]) });
+  }
+  if (!rows.length) throw new Error("수익률표 없음");
+  const dm = text.match(/(?:as of|updated|yields for)\s*:?\s*([A-Z][a-z]+ \d{1,2}, \d{4}|\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+  return { rows: rows.sort((a, b) => a.years - b.years), date: dm ? dm[1] : "", src: "FMSbonds AAA 등급 지방채 수익률" };
+}
+let muniCurveData = null, muniCurveErr = "";
+function renderMuniCurve() {
+  const card = $("#muniRateCard");
+  if (!card) return;
+  if (!muniCurveData) {
+    card.innerHTML = `<h2><span class="lbl">지방채 수익률 (AAA 등급)</span></h2><div class="status err">가져오지 못했습니다${muniCurveErr ? ` (${escapeHtml(muniCurveErr)})` : ""}.</div><p class="note">지방채는 국채처럼 정부가 고시하는 금리가 없어서, 지방채 딜러가 공개하는 AAA 등급 수익률 곡선을 대신 보여줍니다. 실제 매물은 <a href="https://www.fidelity.com/fixed-income-bonds/municipal-bonds" target="_blank" rel="noopener">피델리티 지방채 화면 ↗</a>에서 확인.</p>`;
+    return;
+  }
+  card.innerHTML = `
+    <h2><span class="lbl">지방채 수익률 (AAA 등급)</span></h2>
+    <div class="small" style="margin-bottom:4px">${escapeHtml(muniCurveData.src)}${muniCurveData.date ? ` · ${escapeHtml(muniCurveData.date)}` : ""} · 연 %, 연방세 면제</div>
+    ${muniCurveData.rows.map((r, i) => `<div class="etfRow" style="grid-template-columns:1fr auto;${i === 0 ? "border-top:0" : ""}"><div class="sym">${r.label}</div><div class="px">${fmt(r.val)}%</div></div>`).join("")}
+    <p class="note">지방채는 국채처럼 정부가 고시하는 금리가 없어서, 지방채 딜러(FMSbonds)가 매일 공개하는 AAA 등급 수익률 곡선을 대신 보여줍니다. 등급이 낮거나 발행처에 따라 실제 매물 수익률은 이보다 높을 수 있어요.</p>
+  `;
+}
 let treasuryData = null;
 function renderTreasury() {
   const card = $("#treasCard");
@@ -990,6 +1030,7 @@ function renderTreasury() {
 }
 async function loadMuniBench(force) {
   benchLoadedFor.muni = true;
+  fetchMuniCurve().then(d => { muniCurveData = d; muniCurveErr = ""; renderMuniCurve(); }).catch(e => { muniCurveData = null; muniCurveErr = e.message; renderMuniCurve(); });
   // MMF 7일 수익률 자동 조회(CNBC의 dividendyield) — 재무부 금리표와 동시에 진행
   fetchQuotesCnbc([mmfGet().ticker]).then(q => {
     const d = q[mmfGet().ticker] && q[mmfGet().ticker].div;
@@ -1082,13 +1123,82 @@ function computeIncome(etfData) {
   }
   return { months, sources: sources.filter(s => s.annual > 0).sort((a, b) => b.annual - a.annual), etfFailed, noHistory, receivedYear };
 }
+// ---- 배당 지급 내역 대체 소스(Yahoo가 막힌 환경용): stockanalysis.com 배당 페이지(정적 HTML, 프록시 경유), 7일 캐시 ----
+function parseDateLoose(s) {
+  const d = new Date(String(s).trim());
+  if (isNaN(d)) return null;
+  return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())).toISOString().slice(0, 10);
+}
+function parseDividendTable(html) {
+  const rows = [];
+  const trRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let m;
+  while ((m = trRe.exec(html))) {
+    const cells = [...m[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(c => c[1].replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").trim());
+    if (cells.length < 2) continue;
+    const exDate = parseDateLoose(cells[0]);
+    if (!exDate) continue;
+    const amtCell = cells.find((c, i) => i > 0 && /^\$?\d[\d,]*\.?\d*$/.test(c));
+    const amount = amtCell ? parseFloat(amtCell.replace(/[$,]/g, "")) : NaN;
+    if (!isFinite(amount) || amount <= 0) continue;
+    const payDate = cells.slice(1).map(parseDateLoose).filter(Boolean).pop(); // 마지막 날짜 칸이 지급일(있으면)
+    rows.push({ date: payDate || exDate, amount });
+  }
+  return rows;
+}
+async function fetchDividendHistoryAlt(sym) {
+  const cacheKey = "divHist." + sym;
+  const c = LS.get(cacheKey, null);
+  if (c && Date.now() - c.at < 7 * 86400000) return c.rows;
+  const s = sym.toLowerCase();
+  let rows = null, lastErr = null, fetched = false;
+  for (const path of [`etf/${s}`, `stocks/${s}`]) {
+    const target = `https://stockanalysis.com/${path}/dividend/`;
+    try {
+      const html = await fetchFirstOkText([corsProxies(target)], 10000);
+      fetched = true;
+      const r = parseDividendTable(html);
+      if (r.length) { rows = r; break; }
+    } catch (e) { lastErr = e; }
+  }
+  if (!rows) {
+    if (!fetched) throw lastErr || new Error("배당 내역 없음");
+    rows = []; // 페이지는 받았는데 배당표가 없음 = 무배당 종목(금 ETF 등)으로 간주, 실패 아님
+  }
+  const cutoff = new Date(Date.now() - 400 * 86400000).toISOString().slice(0, 10);
+  rows = rows.filter(r => r.date >= cutoff).sort((a, b) => b.date.localeCompare(a.date));
+  LS.set(cacheKey, { at: Date.now(), rows });
+  return rows;
+}
+// 시세가 대체 소스(CNBC/Stooq)에서 온 종목은 지급 내역이 없으므로 stockanalysis에서 채움
+let divAltStatus = { done: 0, total: 0, failed: [], running: false };
+async function fillDividendHistoryAlt(etfData, onProgress) {
+  const syms = LS.get("etfSymbols", DEFAULT_ETFS).filter(s => parseFloat(getEtfQty(s)) && etfData[s] && !etfData[s].error && etfData[s].src && !(etfData[s].divHistory || []).length);
+  divAltStatus = { done: 0, total: syms.length, failed: [], running: syms.length > 0 };
+  if (!syms.length) return;
+  await mapWithConcurrency(syms, 3, async sym => {
+    try {
+      const rows = await fetchDividendHistoryAlt(sym);
+      const yearAgo = new Date(Date.now() - 366 * 86400000).toISOString().slice(0, 10);
+      etfData[sym].divHistory = rows.filter(r => r.date >= yearAgo);
+      etfData[sym].divSrc = "stockanalysis";
+    } catch (e) { divAltStatus.failed.push(`${sym}: ${e.message}`); }
+    divAltStatus.done++;
+    onProgress();
+  });
+  divAltStatus.running = false;
+  onProgress();
+}
 function renderIncome(etfData, pending) {
   const r = computeIncome(etfData);
   const total12 = r.months.reduce((s, m) => s + m.total, 0);
   const notes = [];
   if (pending) notes.push("시세·배당 정보 불러오는 중…");
-  if (!pending && r.etfFailed) notes.push(`<span style="color:var(--danger)">${r.etfFailed}개 종목 조회 실패 — 그 종목 배당은 빠져 있어요.</span>`);
-  if (!pending && r.noHistory) notes.push(`${r.noHistory}개 종목은 지급 내역을 못 가져와 연배당률 ÷ 12로 추정했어요.`);
+  if (divAltStatus.running) notes.push(`배당 지급 내역 조회 중… ${divAltStatus.done}/${divAltStatus.total} (stockanalysis)`);
+  if (!pending && r.etfFailed) notes.push(`<span style="color:var(--danger)">${r.etfFailed}개 종목 시세 조회 실패 — 그 종목 배당은 빠져 있어요.</span>`);
+  if (!pending && !divAltStatus.running && r.noHistory) notes.push(`${r.noHistory}개 종목은 지급 내역을 못 가져와 연배당률 ÷ 12로 추정했어요.`);
+  if (!divAltStatus.running && divAltStatus.failed.length) notes.push(`<span style="color:var(--danger)">배당 내역 조회 실패 ${divAltStatus.failed.length}개: ${escapeHtml(divAltStatus.failed.slice(0, 3).join(" / "))}${divAltStatus.failed.length > 3 ? " …" : ""}</span>`);
+  if (!pending && !divAltStatus.running && !r.sources.length && !r.etfFailed) notes.push(`<span style="color:var(--danger)">배당 데이터를 하나도 못 가져왔어요. 시세 출처: ${escapeHtml(etfSource || "없음")}</span>`);
   $("#incSummary").innerHTML = `
     <h2><span class="lbl">보유 주식·ETF 예상 배당 (세전)</span></h2>
     <div class="incBig">$${fmtInt(total12 / 12)}<span class="small" style="margin-left:6px;color:var(--muted)">/월 평균</span></div>
@@ -1120,10 +1230,18 @@ function renderIncome(etfData, pending) {
     </div>`).join("") : `<div class="small">${pending ? "불러오는 중…" : "배당 정보가 있는 보유 종목이 없습니다. ETF 탭에서 보유수량을 확인해주세요."}</div>`}
   `;
 }
+let divAltPromise = null, divAltFor = null;
 async function loadIncome(force) {
   if (!etfLoadedOnce || force) renderIncome(lastEtfData, true);
   try { await (force ? loadEtf() : ensureEtfLoaded()); } catch {}
-  renderIncome(lastEtfData, false);
+  if (force) LS.get("etfSymbols", DEFAULT_ETFS).forEach(s => LS.set("divHist." + s, null));
+  const data = lastEtfData;
+  if (!divAltPromise || divAltFor !== data) { // 시세가 새로 조회됐으면(새 data 객체) 배당 내역도 다시 채움
+    divAltFor = data;
+    divAltPromise = fillDividendHistoryAlt(data, () => { renderIncome(data, false); renderEtfRows(LS.get("etfSymbols", DEFAULT_ETFS), data); });
+  }
+  renderIncome(data, false); // fillDividendHistoryAlt가 진행 상태를 먼저 세팅하므로 "조회 중" 안내가 바로 보임
+  await divAltPromise;
   setUpdated(nowLabel() + " 업데이트");
 }
 
