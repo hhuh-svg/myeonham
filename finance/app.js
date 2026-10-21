@@ -113,10 +113,44 @@ function fxSkeleton() {
     </div>
     <div class="row"><button class="btn sm" id="fxRefresh">새로고침</button></div>
     <p class="disclaim">환율은 중간시장가(mid-market) 기준 참고용입니다. 실제 송금·환전 시 은행/증권사 스프레드가 더해집니다.</p>
+    <div class="card">
+      <h2>네트워크 진단</h2>
+      <p class="note">숫자가 안 뜰 때 어디서 막히는지 한 번에 확인합니다.</p>
+      <div class="row" style="margin-top:8px"><button class="btn sm" id="diagRun">진단 실행</button></div>
+      <div id="diagBox" style="margin-top:10px"></div>
+    </div>
   `;
   $("#fxRefresh").addEventListener("click", () => loadFx(true));
   $("#convUsd").addEventListener("input", () => convertFrom("usd"));
   $("#convKrw").addEventListener("input", () => convertFrom("krw"));
+  $("#diagRun").addEventListener("click", runDiagnostics);
+}
+async function runDiagnostics() {
+  const box = $("#diagBox");
+  const tests = [
+    { name: "같은 사이트 파일 (GitHub Pages)", url: new URL("manifest.webmanifest", location.href).href },
+    { name: "jsDelivr (대형 CDN)", url: "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json" },
+    { name: "Google 번역 (translate.googleapis.com)", url: "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=test" },
+    { name: "Frankfurter (환율 API)", url: "https://api.frankfurter.app/latest?from=USD&to=KRW" },
+    { name: "Yahoo Finance (시세 API)", url: "https://query1.finance.yahoo.com/v8/finance/chart/AAPL" },
+    { name: "CORS 프록시 (codetabs)", url: "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent("https://api.frankfurter.app/latest?from=USD&to=KRW") },
+    { name: "CORS 프록시 (allorigins)", url: "https://api.allorigins.win/raw?url=" + encodeURIComponent("https://api.frankfurter.app/latest?from=USD&to=KRW") }
+  ];
+  box.innerHTML = tests.map((t, i) => `<div class="small" id="diag${i}">⏳ ${escapeHtml(t.name)}</div>`).join("");
+  await Promise.all(tests.map(async (t, i) => {
+    const el = $("#diag" + i);
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 6000);
+      const r = await fetch(t.url, { signal: ctrl.signal, cache: "no-store" });
+      clearTimeout(timer);
+      el.innerHTML = r.ok ? `✅ ${escapeHtml(t.name)} (HTTP ${r.status})` : `❌ ${escapeHtml(t.name)} — HTTP ${r.status}`;
+      el.style.color = r.ok ? "var(--ok)" : "var(--danger)";
+    } catch (e) {
+      el.innerHTML = `❌ ${escapeHtml(t.name)} — ${escapeHtml(e.message)}`;
+      el.style.color = "var(--danger)";
+    }
+  }));
 }
 let fxRate = null;
 function convertFrom(side) {
