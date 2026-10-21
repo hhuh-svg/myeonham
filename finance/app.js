@@ -598,8 +598,8 @@ function renderBondHoldings(boxId, ctrl, emptyLabel) {
         <div class="bondName">${escapeHtml(h.name)}</div>
         <div class="small">CUSIP ${escapeHtml(h.cusip)} · 쿠폰 ${fmt(h.coupon, 3)}% · 만기 ${h.maturity}</div>
         <div class="bondStats">
-          <div><span class="k">다음 쿠폰</span><span class="v">${h.nc ? fmtDateShort(isoDate(h.nc)) : "-"}${h.nc ? ` (D-${daysUntil(h.nc)})` : ""}</span></div>
-          <div><span class="k">쿠폰금액</span><span class="v">$${fmt(h.amt, 2)}</span></div>
+          <div><span class="k">다음 쿠폰</span><span class="v hl">${h.nc ? fmtDateShort(isoDate(h.nc)) : "-"}${h.nc ? ` (D-${daysUntil(h.nc)})` : ""}</span></div>
+          <div><span class="k">쿠폰금액</span><span class="v hl">$${fmt(h.amt, 2)}</span></div>
           <div><span class="k">현재수익률</span><span class="v">${fmt(h.curYield)}%</span></div>
           <div><span class="k">평가액</span><span class="v">$${fmtInt(h.mv)}</span></div>
         </div>
@@ -930,13 +930,22 @@ function timeAgo(pubDateStr) {
   if (diffH < 24) return diffH + "시간 전";
   return Math.round(diffH / 24) + "일 전";
 }
-// 구글 번역 비공식 엔드포인트(무료/무키, 많은 오픈소스 번역위젯이 쓰는 방식) + 프록시 대체
+// 번역 소스 두 곳(구글 비공식 엔드포인트 + MyMemory, 둘 다 무료/무키/CORS 허용)을 동시에 시도하고,
+// 둘 다 직접호출이 막혔을 때만 구글 쪽을 프록시로 재시도
 async function translateToKo(text) {
   if (!text) return "";
-  const target = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=${encodeURIComponent(text)}`;
-  const json = await fetchFirstOk([[target], corsProxies(target)], 6000);
-  if (!Array.isArray(json) || !Array.isArray(json[0])) throw new Error("번역 응답 형식 오류");
-  return json[0].map(seg => seg[0]).join("");
+  const gTarget = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=${encodeURIComponent(text)}`;
+  const mTarget = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|ko`;
+  const parseGoogle = json => { if (!Array.isArray(json) || !Array.isArray(json[0])) throw new Error("구글 번역 응답 형식 오류"); return json[0].map(seg => seg[0]).join(""); };
+  const parseMyMemory = json => { const t = json && json.responseData && json.responseData.translatedText; if (!t) throw new Error("MyMemory 응답 형식 오류"); return t; };
+  try {
+    return await raceOk([
+      () => fetchJSON(gTarget, 6000).then(parseGoogle),
+      () => fetchJSON(mTarget, 6000).then(parseMyMemory)
+    ]);
+  } catch (e) {
+    return await raceOk(corsProxies(gTarget).map(u => () => fetchJSON(u, 6000).then(parseGoogle)));
+  }
 }
 function newsCardHtml(it, idx) {
   return `
@@ -969,7 +978,9 @@ async function loadNews(force) {
   items = items.slice(0, NEWS_LIMIT);
   box.innerHTML = items.map(newsCardHtml).join("");
   setUpdated(nowLabel() + " 업데이트");
-  items.forEach(async (it, idx) => {
+  // 기사 수만큼 동시에 번역을 쏘면(최대 15개 x 제목/본문 2건) 같은 호스트에 연결이
+  // 몰려 브라우저 연결 제한에 걸려 전부 실패하는 걸 막기 위해 동시 처리 개수를 제한
+  mapWithConcurrency(items, 3, async (it, idx) => {
     try {
       const ko = await translateToKo(it.title);
       const el = $("#newsKo" + idx);
