@@ -100,8 +100,8 @@ async function mapWithConcurrency(items, limit, fn) {
 // =========================================================
 // 탭 전환
 // =========================================================
-const PANES = ["fx", "etf", "muni", "cd", "news"];
-const TITLES = { fx: "환율", etf: "ETF 시세", muni: "비과세 지방채", cd: "CD 금리", news: "뉴스" };
+const PANES = ["fx", "etf", "muni", "income", "news"];
+const TITLES = { fx: "환율", etf: "ETF 시세", muni: "비과세 지방채", income: "배당·이자 현황", news: "뉴스" };
 function showTab(tab) {
   PANES.forEach(p => { $("#pane-" + p).hidden = p !== tab; });
   $$('.tabs button').forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
@@ -110,8 +110,7 @@ function showTab(tab) {
   if (tab === "fx" && !fxLoaded) loadFx();
   if (tab === "etf" && !etfLoadedOnce) loadEtf();
   if (tab === "muni" && !benchLoadedFor.muni) loadMuniBench();
-  if (tab === "cd" && !benchLoadedFor.cd) loadCdBench();
-  if (tab === "cd" && !cdRatesLoadedOnce) loadCdRates();
+  if (tab === "income") loadIncome(); // 수량·채권이 다른 탭에서 바뀔 수 있어 볼 때마다 다시 계산(조회는 재사용)
   if (tab === "news" && !newsLoadedOnce) loadNews();
 }
 $$('.tabs button').forEach(b => b.addEventListener("click", () => showTab(b.dataset.tab)));
@@ -500,8 +499,7 @@ async function fetchQuote(symbol) {
   const divEvents = (r.events && r.events.dividends) ? Object.values(r.events.dividends) : [];
   const divHistory = divEvents
     .map(e => ({ date: new Date(e.date * 1000).toISOString().slice(0, 10), amount: e.amount }))
-    .sort((a, b) => b.date.localeCompare(a.date))
-    .slice(0, 3);
+    .sort((a, b) => b.date.localeCompare(a.date)); // 지난 1년 전체 — 배당 탭의 월별 예상 계산에 씀
   return { price, pct: ((price - prev) / prev) * 100, name: r.meta.longName || r.meta.shortName || "", divHistory };
 }
 function quoteSummaryUrls(symbol) {
@@ -517,7 +515,11 @@ async function fetchDividend(symbol) {
   if (y == null && r == null) throw new Error("no dividend");
   return { yield: y != null ? y * 100 : null, rate: r != null ? r : null };
 }
-async function loadEtf() {
+// 배당 탭도 같은 조회 결과를 쓰므로, 진행 중인 조회 promise를 공유해 두 번 조회하지 않게 함
+let etfLoadPromise = null;
+function loadEtf() { etfLoadPromise = loadEtfInner(); return etfLoadPromise; }
+function ensureEtfLoaded() { return etfLoadPromise || loadEtf(); }
+async function loadEtfInner() {
   etfLoadedOnce = true;
   const syms = LS.get("etfSymbols", DEFAULT_ETFS);
   renderEtfRows(syms, {});
@@ -554,7 +556,7 @@ const BENCH_SERIES = [
   { key: "tnx", ticker: "^TNX", label: "10년" },
   { key: "tyx", ticker: "^TYX", label: "30년" }
 ];
-const benchLoadedFor = { muni: false, cd: false };
+const benchLoadedFor = { muni: false };
 let bench = { irx: null, fvx: null, tnx: null, tyx: null, loadedAt: 0 };
 async function loadBenchmark(force) {
   if (bench.loadedAt && !force && Date.now() - bench.loadedAt < 5 * 60000) return bench;
@@ -826,130 +828,133 @@ async function loadMuniBench(force) {
 }
 
 // =========================================================
-// 5) CD: 피델리티 바로가기 + 미국채 벤치마크 자동 표시(브로커드 CD는 보통 이보다 소폭 높게 나옴)
+// 5) 배당·이자 현황: 보유 ETF·주식 배당(지난 1년 실제 지급 내역 기준) + 지방채·국채 쿠폰을 월별로 합산
 // =========================================================
-const paneCd = $("#pane-cd");
-function cdSkeleton() {
-  paneCd.innerHTML = `
-    <div class="card"><h2><span class="lbl">피델리티 CD 금리</span></h2><div class="small">피델리티 CD 페이지는 자바스크립트로 그려지는 화면이라 자동으로 숫자를 가져올 수 없습니다. 아래 "피델리티" 버튼으로 직접 확인해주세요.</div></div>
-    <div class="card" id="cdRatesCard_chase"><h2><span class="lbl">체이스 CD 금리 (실시간 시도)</span></h2><div class="status">불러오는 중…</div></div>
-    <div class="card" id="cdBenchCard"><h2><span class="lbl">금리</span></h2><div class="status">불러오는 중…</div></div>
-    <div class="row"><button class="btn sm" id="cdRefresh">새로고침</button></div>
-    <div class="row">
-      <a class="btn sm" href="https://www.fidelity.com/fixed-income-bonds/cds/new-issue-cds" target="_blank" rel="noopener">피델리티</a>
-      <a class="btn sm" href="https://www.chase.com/personal/savings/bank-cd" target="_blank" rel="noopener">체이스</a>
-      <a class="btn sm" href="https://robinhood.com/us/en/support/articles/brokerage-cash-sweep/" target="_blank" rel="noopener">로빈후드(현금이자)</a>
+const paneIncome = $("#pane-income");
+function incomeSkeleton() {
+  paneIncome.innerHTML = `
+    <div class="card" id="incSummary"><h2><span class="lbl">월 평균 예상 수입 (세전)</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="card" id="incMonths"><h2><span class="lbl">앞으로 12개월 월별 예상</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="card" id="incSources"><h2><span class="lbl">종목별 연간 예상 (세전)</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="row"><button class="btn sm" id="incRefresh">새로고침</button></div>
+    <p class="disclaim">ETF·주식 배당은 지난 1년 실제 지급 내역(날짜·주당 금액)이 다음 1년에도 그대로 반복된다고 가정하고 보유수량을 곱한 추정치입니다. 채권 쿠폰은 만기 월·일 기준 6개월 간격 지급 가정. 전부 세전이며 지방채 이자는 연방세 면제입니다. 수량은 ETF 탭에서, 채권은 지방채 탭에서 고칠 수 있어요.</p>
+  `;
+  $("#incRefresh").addEventListener("click", () => loadIncome(true));
+}
+function monthKey(d) { return `${d.getUTCFullYear()}.${String(d.getUTCMonth() + 1).padStart(2, "0")}`; }
+function addMonthsUTC(d, n) { return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + n, d.getUTCDate())); }
+// 만기 월/일 기준 6개월 간격 쿠폰일 중 [start, end) 구간에 드는 날짜들(만기 이후는 제외)
+function couponDatesInWindow(maturityISO, start, end) {
+  const [my, mm, md] = maturityISO.split("-").map(Number);
+  const maturity = new Date(Date.UTC(my, mm - 1, md));
+  const out = [];
+  for (let y = start.getUTCFullYear() - 1; y <= end.getUTCFullYear() + 1; y++) {
+    [mm, ((mm + 5) % 12) + 1].forEach(m => {
+      const d = new Date(Date.UTC(y, m - 1, md));
+      if (d >= start && d < end && d <= maturity) out.push(d);
+    });
+  }
+  return out.sort((a, b) => a - b);
+}
+function computeIncome(etfData) {
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const end = addMonthsUTC(start, 12);
+  const events = [];
+  const sources = [];
+  [[muniBonds, "muni", "지방채"], [govBonds, "gov", "국채"]].forEach(([ctrl, kind, kindLabel]) => {
+    ctrl.load().forEach(h => {
+      const half = h.face * h.coupon / 100 / 2;
+      couponDatesInWindow(h.maturity, start, end).forEach(d => events.push({ date: d, amount: half, kind, label: h.name }));
+      sources.push({ kind, label: h.name, annual: h.face * h.coupon / 100, detail: `${kindLabel} · 쿠폰 ${fmt(h.coupon, 3)}% · 반기마다 $${fmt(half, 2)}` });
+    });
+  });
+  let etfFailed = 0;
+  LS.get("etfSymbols", DEFAULT_ETFS).forEach(sym => {
+    const qty = parseFloat(getEtfQty(sym));
+    if (!qty) return;
+    const d = etfData[sym];
+    if (!d || d.error) { etfFailed++; return; }
+    const hist = (d.divHistory || []).filter(e => e.amount > 0);
+    if (hist.length) {
+      hist.forEach(e => {
+        const [y, m, dd] = e.date.split("-").map(Number);
+        const proj = new Date(Date.UTC(y + 1, m - 1, dd));
+        if (proj >= start && proj < end) events.push({ date: proj, amount: e.amount * qty, kind: "div", label: sym });
+      });
+      const perShare = hist.reduce((s, e) => s + e.amount, 0);
+      const n = hist.length;
+      const freq = n >= 11 ? "월배당" : n >= 4 ? "분기배당" : n === 2 ? "반기배당" : n === 1 ? "연 1회" : `연 ${n}회`;
+      sources.push({ kind: "div", label: sym, annual: perShare * qty, detail: `${freq} · 주당 연 $${fmt(perShare, 3)} × ${qty}주` });
+    } else if (d.div && d.div.rate) {
+      // 지급 내역은 없고 연배당률만 있는 경우: 12개월에 균등 분배(추정)
+      for (let i = 0; i < 12; i++) events.push({ date: addMonthsUTC(start, i), amount: d.div.rate * qty / 12, kind: "div", label: sym });
+      sources.push({ kind: "div", label: sym, annual: d.div.rate * qty, detail: `연배당 $${fmt(d.div.rate)}/주 × ${qty}주 (월 균등 추정)` });
+    }
+  });
+  const months = [];
+  for (let i = 0; i < 12; i++) {
+    const key = monthKey(addMonthsUTC(start, i));
+    const evs = events.filter(e => monthKey(e.date) === key).sort((a, b) => a.date - b.date);
+    const by = { div: 0, muni: 0, gov: 0 };
+    evs.forEach(e => { by[e.kind] += e.amount; });
+    months.push({ key, total: by.div + by.muni + by.gov, by, events: evs });
+  }
+  return { months, sources: sources.filter(s => s.annual > 0).sort((a, b) => b.annual - a.annual), etfFailed };
+}
+function renderIncome(etfData, pending) {
+  const r = computeIncome(etfData);
+  const total12 = r.months.reduce((s, m) => s + m.total, 0);
+  const byKind = { div: 0, muni: 0, gov: 0 };
+  r.months.forEach(m => { byKind.div += m.by.div; byKind.muni += m.by.muni; byKind.gov += m.by.gov; });
+  const note = pending
+    ? `<div class="small" style="margin-top:8px">ETF·주식 배당 정보 불러오는 중… (채권 이자는 먼저 계산됨)</div>`
+    : (r.etfFailed ? `<div class="small" style="margin-top:8px;color:var(--danger)">ETF·주식 ${r.etfFailed}개 조회 실패 — 그 종목 배당은 빠져 있어요. 새로고침으로 다시 시도.</div>` : "");
+  $("#incSummary").innerHTML = `
+    <h2><span class="lbl">월 평균 예상 수입 (세전)</span></h2>
+    <div class="incBig">$${fmtInt(total12 / 12)}<span class="small" style="margin-left:6px;color:var(--muted)">/월</span></div>
+    <div class="incGrid">
+      <div><span class="k">12개월 합계</span><span class="v">$${fmtInt(total12)}</span></div>
+      <div><span class="k">이번 달</span><span class="v">$${fmtInt(r.months[0].total)}</span></div>
+      <div><span class="k">다음 달</span><span class="v">$${fmtInt(r.months[1].total)}</span></div>
     </div>
-    <p class="disclaim">브로커드 CD는 발행사·물량에 따라 보통 같은 만기 미국채보다 0.1~0.3%p 정도 높게 나오는 경우가 많습니다(시장 상황에 따라 다를 수 있음). 로빈후드는 개별 CD·채권 상품이 없고 현금에 이자를 주는 방식이라 성격이 달라요 — 위 링크는 그 현금이자 안내 페이지입니다.</p>
+    <div class="incGrid">
+      <div><span class="k">ETF·주식 배당</span><span class="v">$${fmtInt(byKind.div)}</span></div>
+      <div><span class="k">지방채 이자</span><span class="v">$${fmtInt(byKind.muni)}</span></div>
+      <div><span class="k">국채 이자</span><span class="v">$${fmtInt(byKind.gov)}</span></div>
+    </div>
+    ${note}
   `;
-  $("#cdRefresh").addEventListener("click", () => { loadCdBench(true); loadCdRates(true); });
-}
-function computeMuniThreshold() {
-  const c = LS.get("muniCalc", { fed: "32", state: "0", src: "irx", custom: "" });
-  const fed = parseFloat(c.fed) || 0;
-  const state = parseFloat(c.state) || 0;
-  const base = c.src === "custom" ? parseFloat(c.custom) : bench[c.src];
-  if (!Number.isFinite(base)) return null;
-  const combo = Math.min(0.9, (fed + state) / 100);
-  const srcInfo = BENCH_SERIES.find(s => s.key === c.src);
-  return { threshold: base * (1 - combo), srcLabel: srcInfo ? srcInfo.label : "직접입력", fed, state };
-}
-function rateRow(label, val, first) {
-  return `<div class="etfRow" style="grid-template-columns:1fr auto auto;${first ? "border-top:0" : ""}"><div class="sym">${label}</div><div class="px">${val != null ? fmt(val) + "%" : "조회 실패"}</div><div></div></div>`;
-}
-function renderCdBench() {
-  const card = $("#cdBenchCard");
-  if (!card) return;
-  const vals = BENCH_SERIES.map(s => bench[s.key]);
-  if (vals.every(v => v == null)) {
-    card.innerHTML = `<h2><span class="lbl">금리</span></h2><div class="status err">조회 실패. 네트워크를 확인하고 새로고침 해주세요.</div>`;
-    return;
-  }
-  const muni = computeMuniThreshold();
-  card.innerHTML = `
-    <h2><span class="lbl">금리</span></h2>
-    <div class="small" style="margin:2px 0 4px">CD 금리 (벤치마크 — 브로커드 CD는 보통 이보다 0.1~0.3%p 높음)</div>
-    ${rateRow("3개월", bench.irx, true)}
-    ${rateRow("5년", bench.fvx)}
-    <div class="small" style="margin:14px 0 4px">지방채 매수 기준선 (세후환산, 연방 ${muni ? muni.fed : "-"}%·주 ${muni ? muni.state : "-"}% 가정, 미국채 ${muni ? muni.srcLabel : "-"} 기준)</div>
-    ${rateRow("세후환산 기준", muni ? muni.threshold : null, true)}
-    <div class="small" style="margin:14px 0 4px">국채 금리 (전체 만기)</div>
-    ${rateRow("3개월", bench.irx, true)}
-    ${rateRow("5년", bench.fvx)}
-    ${rateRow("10년", bench.tnx)}
-    ${rateRow("30년", bench.tyx)}
+  const max = Math.max(1, ...r.months.map(m => m.total));
+  $("#incMonths").innerHTML = `
+    <h2><span class="lbl">앞으로 12개월 월별 예상</span></h2>
+    ${r.months.map(m => {
+      const parts = [];
+      if (m.by.div) parts.push(`배당 $${fmtInt(m.by.div)}`);
+      if (m.by.muni) parts.push(`지방채 $${fmtInt(m.by.muni)}`);
+      if (m.by.gov) parts.push(`국채 $${fmtInt(m.by.gov)}`);
+      const detail = m.events.map(e => `${escapeHtml(e.label)} $${fmtInt(e.amount)}`).join(" · ");
+      return `<div class="incRow">
+        <div class="m">${m.key}</div>
+        <div class="incBar"><i style="width:${Math.round(m.total / max * 100)}%"></i></div>
+        <div class="amt">$${fmtInt(m.total)}</div>
+        ${m.events.length ? `<div class="incSub">${parts.join(" · ")}<br>${detail}</div>` : ""}
+      </div>`;
+    }).join("")}
+  `;
+  $("#incSources").innerHTML = `
+    <h2><span class="lbl">종목별 연간 예상 (세전)</span></h2>
+    ${r.sources.length ? r.sources.map((s, i) => `<div class="etfRow" style="grid-template-columns:1fr auto;${i === 0 ? "border-top:0" : ""}">
+      <div><div class="sym">${escapeHtml(s.label)}</div><div class="nm">${escapeHtml(s.detail)}</div></div>
+      <div class="px" style="text-align:right">$${fmtInt(s.annual)}<div class="small">월 $${fmtInt(s.annual / 12)}</div></div>
+    </div>`).join("") : `<div class="small">계산할 수 있는 종목이 아직 없습니다. ETF 탭에서 보유수량을 입력해주세요.</div>`}
   `;
 }
-async function loadCdBench(force) {
-  benchLoadedFor.cd = true;
-  try { await loadBenchmark(force); } catch {}
-  renderCdBench();
+async function loadIncome(force) {
+  if (!etfLoadedOnce || force) renderIncome(lastEtfData, true);
+  try { await (force ? loadEtf() : ensureEtfLoaded()); } catch {}
+  renderIncome(lastEtfData, false);
   setUpdated(nowLabel() + " 업데이트");
-}
-// 은행/증권사 공개 CD 페이지에서 금리표를 직접 긁어오는 시도. 로그인 없이 보이는 화면이 JS로
-// 렌더링되는 경우(흔함) 원문 HTML에는 숫자가 없어서 실패할 수 있음 — 그럴 땐 벤치마크로 대체.
-async function scrapeCdRates(target) {
-  // r.jina.ai는 페이지를 실제로 렌더링해서 텍스트로 반환해주는 서비스라 일반 프록시보다 느림
-  let html;
-  try { html = await fetchFirstOkText([corsProxies(target)], 6000); }
-  catch (e1) {
-    try { html = await fetchFirstOkText([[`https://r.jina.ai/${target}`]], 10000); }
-    catch (e2) { throw new Error(e1.message + " / " + e2.message); }
-  }
-  const text = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ");
-  const TERM = /(\d{1,2})\s*[-]?\s*(Month|Months|Year|Years|Mo|Yr|Day|Days)s?\b/i;
-  // 사이트마다 "기간 ... 금리%" 또는 "금리% ... 기간" 순서가 달라서 양쪽 다 시도
-  const reForward = new RegExp(TERM.source + `[^%\\d]{0,60}?(\\d{1,2}\\.\\d{1,3})\\s*%`, "gi");
-  const reBackward = new RegExp(`(\\d{1,2}\\.\\d{1,3})\\s*%[^%\\d]{0,60}?` + TERM.source, "gi");
-  const found = [];
-  const seen = new Set();
-  let m;
-  while ((m = reForward.exec(text)) && found.length < 12) {
-    const key = m[1] + m[2][0].toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    found.push({ term: `${m[1]} ${m[2]}`, apy: parseFloat(m[3]) });
-  }
-  while ((m = reBackward.exec(text)) && found.length < 12) {
-    const key = m[2] + m[3][0].toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    found.push({ term: `${m[2]} ${m[3]}`, apy: parseFloat(m[1]) });
-  }
-  if (!found.length) throw new Error("금리표를 찾지 못함 (페이지가 자바스크립트로 그려지는 경우일 수 있음)");
-  return found;
-}
-// 피델리티는 자바스크립트로 그려지는 화면이라 원문 HTML에 숫자가 없어 실시간 조회가 원천적으로
-// 불가능 — 매번 시도하고 실패 메시지를 보여주는 건 의미가 없어 CD_SOURCES에서 제외(위 안내 카드로 대체)
-const CD_SOURCES = [
-  { key: "chase", label: "체이스", url: "https://www.chase.com/personal/savings/bank-cd" }
-];
-let cdRatesLoadedOnce = false;
-async function loadOneCdSource(src) {
-  const card = $("#cdRatesCard_" + src.key);
-  if (!card) return;
-  card.innerHTML = `<h2><span class="lbl">${src.label} CD 금리 (실시간 시도)</span></h2><div class="status">불러오는 중…</div>`;
-  try {
-    const rates = await scrapeCdRates(src.url);
-    rates.sort((a, b) => b.apy - a.apy);
-    card.innerHTML = `
-      <h2><span class="lbl">${src.label} CD 금리 (실시간 시도)</span></h2>
-      ${rates.map((r, i) => `<div class="etfRow" style="grid-template-columns:1fr auto auto;${i === 0 ? "border-top:0" : ""}"><div class="sym">${escapeHtml(r.term)}</div><div class="px">${fmt(r.apy)}%</div><div></div></div>`).join("")}
-      <p class="note">${src.label} 공개 페이지를 그대로 긁어온 값이라 표시 오류가 있을 수 있어요. 실제 매수/가입 전엔 꼭 ${src.label} 앱에서 재확인하세요.</p>
-    `;
-  } catch (e) {
-    card.innerHTML = `
-      <h2><span class="lbl">${src.label} CD 금리 (실시간 시도)</span></h2>
-      <div class="status err">자동으로 가져오지 못했습니다.</div>
-      <div class="small" style="margin-top:4px;word-break:break-all">사유: ${escapeHtml(e.message)}</div>
-      <p class="note">아래 미국채 벤치마크를 참고하거나, ${src.label}에서 직접 확인해주세요.</p>
-    `;
-  }
-}
-async function loadCdRates(force) {
-  if (cdRatesLoadedOnce && !force) return;
-  cdRatesLoadedOnce = true;
-  await mapWithConcurrency(CD_SOURCES, 2, loadOneCdSource);
 }
 
 // =========================================================
@@ -1066,8 +1071,9 @@ async function loadNews(force) {
 // =========================================================
 // 초기화
 // =========================================================
-fxSkeleton(); etfSkeleton(); muniSkeleton(); cdSkeleton(); newsSkeleton();
-showTab(LS.get("lastTab", "fx"));
+fxSkeleton(); etfSkeleton(); muniSkeleton(); incomeSkeleton(); newsSkeleton();
+const lastTab = LS.get("lastTab", "fx");
+showTab(PANES.includes(lastTab) ? lastTab : "fx"); // 없어진 탭(cd)이 저장돼 있을 수 있음
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
