@@ -101,7 +101,7 @@ async function mapWithConcurrency(items, limit, fn) {
 // 탭 전환
 // =========================================================
 const PANES = ["fx", "etf", "muni", "income", "news"];
-const TITLES = { fx: "환율", etf: "ETF 시세", muni: "비과세 지방채", income: "배당·이자 현황", news: "뉴스" };
+const TITLES = { fx: "환율", etf: "ETF 시세", muni: "채권", income: "배당·이자 현황", news: "뉴스" };
 function showTab(tab) {
   PANES.forEach(p => { $("#pane-" + p).hidden = p !== tab; });
   $$('.tabs button').forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
@@ -378,6 +378,7 @@ function etfSkeleton() {
     <div class="card">
       <h2><span class="lbl">주요 미국 ETF</span></h2>
       <div id="etfList"></div>
+      <div class="small" id="etfSourceNote" style="margin-top:8px"></div>
       <div class="etfAdd">
         <input id="etfInput" placeholder="예: ARKK" maxlength="6">
         <button class="btn sm" id="etfAddBtn">추가</button>
@@ -392,6 +393,12 @@ function etfSkeleton() {
   $("#etfAddBtn").addEventListener("click", addEtfSymbol);
   $("#etfInput").addEventListener("keydown", e => { if (e.key === "Enter") addEtfSymbol(); });
 }
+// 대체 소스는 전일대비를 안 주는 경우가 있어 null이면 "—"로 표시
+function pctCell(pct) {
+  if (pct == null || !isFinite(pct)) return `<div class="pc" style="color:var(--muted)">—</div>`;
+  const pos = pct >= 0;
+  return `<div class="pc ${pos ? "pos" : "neg"}">${pos ? "▲" : "▼"} ${fmt(Math.abs(pct))}%</div>`;
+}
 function renderIndexRows(data) {
   const box = $("#indexList");
   if (!box) return;
@@ -400,11 +407,10 @@ function renderIndexRows(data) {
     const base = `style="grid-template-columns:1fr auto auto;${i === 0 ? "border-top:0" : ""}"`;
     if (!d) return `<div class="etfRow" ${base}><div class="sym">${label}</div><div class="px">…</div><div></div></div>`;
     if (d.error) return `<div class="etfRow" ${base}><div class="sym">${label}</div><div class="err">조회 실패</div><div></div></div>`;
-    const pos = d.pct >= 0;
     return `<div class="etfRow" ${base}>
       <div class="sym">${label}</div>
       <div class="px">${fmt(d.price)}</div>
-      <div class="pc ${pos ? "pos" : "neg"}">${pos ? "▲" : "▼"} ${fmt(Math.abs(d.pct))}%</div>
+      ${pctCell(d.pct)}
     </div>`;
   }).join("");
 }
@@ -452,7 +458,6 @@ function renderEtfRows(syms, data) {
     </div>`;
     if (!d) return `<div class="etfRow" data-sym="${s}"><div class="sym">${s}</div><div class="px">…</div><div></div>${qtyRow}</div>`;
     if (d.error) return `<div class="etfRow" data-sym="${s}"><div class="sym">${s}</div><div class="err">조회 실패</div><button class="delbtn" data-del="${s}">삭제</button>${qtyRow}</div>`;
-    const pos = d.pct >= 0;
     const parts = [];
     if (qty) parts.push(`평가액 $${fmtInt(qty * d.price)}`);
     if (qty && cost) {
@@ -466,7 +471,7 @@ function renderEtfRows(syms, data) {
     return `<div class="etfRow" data-sym="${s}">
       <div class="sym">${s}<button class="delbtn" data-del="${s}" style="margin-left:6px">삭제</button></div>
       <div class="px">$${fmt(d.price)}</div>
-      <div class="pc ${pos ? "pos" : "neg"}">${pos ? "▲" : "▼"} ${fmt(Math.abs(d.pct))}%</div>
+      ${pctCell(d.pct)}
       <div class="nm">${escapeHtml(d.name || "")}</div>
       ${parts.length ? `<div class="nm" style="color:var(--accent)">${parts.join(" · ")}</div>` : ""}
       ${qtyRow}
@@ -519,6 +524,57 @@ async function fetchDividend(symbol) {
 let etfLoadPromise = null;
 function loadEtf() { etfLoadPromise = loadEtfInner(); return etfLoadPromise; }
 function ensureEtfLoaded() { return etfLoadPromise || loadEtf(); }
+// ---------- Yahoo가 막힌 환경용 대체 시세 소스 ----------
+// 이 사용자 환경에선 Yahoo Finance가 직접호출·프록시 모두 실패하는 것으로 보임(ETF·지수·국채 전부 동시 실패).
+// CNBC 공개 시세 API(한 번에 여러 심볼, 전일대비·배당률 포함) → Stooq CSV(가격만, 당일 시가 대비) 순으로 시도.
+const CNBC_MAP = { "^GSPC": ".SPX", "^IXIC": ".IXIC", "^IRX": "US3M", "^FVX": "US5Y", "^TNX": "US10Y", "^TYX": "US30Y" };
+const STOOQ_MAP = { "^GSPC": "^spx", "^IXIC": "^ndq" };
+function numLoose(s) { if (s == null) return null; const n = parseFloat(String(s).replace(/[,%+\s]/g, "")); return isFinite(n) ? n : null; }
+async function fetchQuotesCnbc(symbols) {
+  const list = symbols.map(s => CNBC_MAP[s] || s);
+  const target = `https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=${encodeURIComponent(list.join("|"))}&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json`;
+  const json = await fetchFirstOk([[target], corsProxies(target)], 8000);
+  let arr = json && json.FormattedQuoteResult && json.FormattedQuoteResult.FormattedQuote;
+  if (!arr) throw new Error("CNBC 응답 형식 오류");
+  if (!Array.isArray(arr)) arr = [arr];
+  const out = {};
+  symbols.forEach((orig, i) => {
+    const q = arr.find(x => x && x.symbol && String(x.symbol).toUpperCase() === list[i].toUpperCase()) || (arr.length === symbols.length ? arr[i] : null);
+    const price = q && numLoose(q.last);
+    if (price == null) return;
+    const rate = numLoose(q.dividend), yld = numLoose(q.dividendyield);
+    out[orig] = { price, pct: numLoose(q.change_pct), name: q.name || "", divHistory: [], src: "CNBC" };
+    if (rate != null || yld != null) out[orig].div = { rate, yield: yld };
+  });
+  if (!Object.keys(out).length) throw new Error("CNBC 시세 없음");
+  return out;
+}
+async function fetchQuotesStooq(symbols) {
+  const list = symbols.map(s => STOOQ_MAP[s] || (s.toLowerCase() + ".us"));
+  const target = `https://stooq.com/q/l/?s=${encodeURIComponent(list.join("+"))}&f=sd2t2ohlcv&h&e=csv`;
+  const csv = await fetchFirstOkText([[target], corsProxies(target)], 8000);
+  const rows = csv.trim().split(/\r?\n/).slice(1).map(l => l.split(","));
+  const out = {};
+  symbols.forEach((orig, i) => {
+    const row = rows.find(r => (r[0] || "").trim().toLowerCase() === list[i].toLowerCase());
+    if (!row) return;
+    const open = parseFloat(row[3]), close = parseFloat(row[6]);
+    if (!isFinite(close)) return;
+    out[orig] = { price: close, pct: isFinite(open) && open ? (close - open) / open * 100 : null, name: "", divHistory: [], src: "Stooq(당일 시가 대비)" };
+  });
+  if (!Object.keys(out).length) throw new Error("Stooq 시세 없음");
+  return out;
+}
+async function fetchQuotesFallback(symbols) {
+  const errs = [];
+  for (const fn of [fetchQuotesCnbc, fetchQuotesStooq]) {
+    try { return await fn(symbols); } catch (e) { errs.push(e.message); }
+  }
+  throw new Error(errs.join(" / "));
+}
+let yahooBlocked = false;
+let etfSource = "";
+function renderEtfSource() { const el = $("#etfSourceNote"); if (el) el.textContent = etfSource ? "시세 출처: " + etfSource : ""; }
 async function loadEtfInner() {
   etfLoadedOnce = true;
   const syms = LS.get("etfSymbols", DEFAULT_ETFS);
@@ -527,19 +583,58 @@ async function loadEtfInner() {
   const data = {};
   const idata = {};
   lastEtfData = data;
-  await Promise.all([
-    mapWithConcurrency(syms, 4, async sym => {
-      try { data[sym] = await fetchQuote(sym); }
-      catch { data[sym] = { error: true }; renderEtfRows(syms, data); return; }
-      renderEtfRows(syms, data);
-      try { data[sym].div = await fetchDividend(sym); renderEtfRows(syms, data); } catch {}
-    }),
-    mapWithConcurrency(INDEX_TICKERS, 2, async ({ sym }) => {
-      try { idata[sym] = await fetchQuote(sym); }
-      catch { idata[sym] = { error: true }; }
-      renderIndexRows(idata);
-    })
-  ]);
+  etfSource = ""; renderEtfSource();
+  // Yahoo가 아예 막힌 환경에서 26개를 하나씩 10초씩 실패시키지 않도록 첫 종목 하나로 먼저 탐침하고,
+  // 대체 소스(CNBC 배치 1회) 조회는 탐침과 동시에 출발시켜 Yahoo가 막혀 있어도 기다리지 않게 함
+  const allSyms = [...syms, ...INDEX_TICKERS.map(t => t.sym)];
+  const fallbackPromise = fetchQuotesFallback(allSyms).then(g => {
+    // 탐침(Yahoo)이 아직 안 끝났으면 대체 소스 값을 먼저 그려서 빈 화면으로 기다리지 않게 함
+    let shown = false;
+    syms.forEach(s => { if (!data[s] && g[s]) { data[s] = g[s]; shown = true; } });
+    INDEX_TICKERS.forEach(t => { if (!idata[t.sym] && g[t.sym]) { idata[t.sym] = g[t.sym]; shown = true; } });
+    if (shown) { renderEtfRows(syms, data); renderIndexRows(idata); etfSource = etfSource || [...new Set(Object.values(g).map(x => x.src))].join("/"); renderEtfSource(); }
+    return g;
+  }).catch(e => ({ __error: e.message }));
+  let yahooOk = false;
+  if (syms.length) {
+    try { data[syms[0]] = await fetchQuote(syms[0]); yahooOk = true; renderEtfRows(syms, data); } catch {}
+  }
+  yahooBlocked = !yahooOk;
+  if (yahooOk) {
+    etfSource = "Yahoo";
+    await Promise.all([
+      mapWithConcurrency(syms.slice(1), 4, async sym => {
+        try { data[sym] = await fetchQuote(sym); }
+        catch { data[sym] = { error: true }; renderEtfRows(syms, data); return; }
+        renderEtfRows(syms, data);
+        try { data[sym].div = await fetchDividend(sym); renderEtfRows(syms, data); } catch {}
+      }),
+      mapWithConcurrency(INDEX_TICKERS, 2, async ({ sym }) => {
+        try { idata[sym] = await fetchQuote(sym); }
+        catch { idata[sym] = { error: true }; }
+        renderIndexRows(idata);
+      }),
+      (async () => { try { data[syms[0]].div = await fetchDividend(syms[0]); renderEtfRows(syms, data); } catch {} })()
+    ]);
+  }
+  const failedSyms = syms.filter(s => !data[s] || data[s].error);
+  const failedIdx = INDEX_TICKERS.map(t => t.sym).filter(s => !idata[s] || idata[s].error);
+  if (failedSyms.length || failedIdx.length) {
+    const got = await fallbackPromise;
+    if (got.__error) {
+      failedSyms.forEach(s => { data[s] = { error: true }; });
+      failedIdx.forEach(s => { idata[s] = { error: true }; });
+      etfSource = (etfSource ? etfSource + " · " : "") + "대체 소스도 실패: " + got.__error;
+    } else {
+      failedSyms.forEach(s => { data[s] = got[s] || { error: true }; });
+      failedIdx.forEach(s => { idata[s] = got[s] || { error: true }; });
+      const srcs = [...new Set(Object.values(got).map(g => g.src))].join("/");
+      etfSource = etfSource ? `${etfSource} + ${srcs}(일부)` : srcs;
+    }
+    renderEtfRows(syms, data);
+    renderIndexRows(idata);
+  }
+  renderEtfSource();
   setUpdated(nowLabel() + " 업데이트");
 }
 
@@ -563,12 +658,22 @@ async function loadBenchmark(force) {
   // 4개를 한꺼번에 쏘면(특히 직접호출이 막혀 전부 프록시로 넘어갈 때) CD 탭의 다른 프록시
   // 요청(CD 금리 스크래핑)과 겹쳐 무료 프록시 서비스 쪽에서 과부하로 같이 실패하기 쉬워
   // 동시 처리 개수를 제한
-  const results = await mapWithConcurrency(BENCH_SERIES, 2, async s => {
-    try { return { status: "fulfilled", value: await fetchQuote(s.ticker) }; }
-    catch (e) { return { status: "rejected", reason: e }; }
-  });
   const next = { loadedAt: Date.now() };
-  BENCH_SERIES.forEach((s, i) => { next[s.key] = results[i].status === "fulfilled" ? results[i].value.price : null; });
+  if (!yahooBlocked) {
+    const results = await mapWithConcurrency(BENCH_SERIES, 2, async s => {
+      try { return { status: "fulfilled", value: await fetchQuote(s.ticker) }; }
+      catch (e) { return { status: "rejected", reason: e }; }
+    });
+    BENCH_SERIES.forEach((s, i) => { next[s.key] = results[i].status === "fulfilled" ? results[i].value.price : null; });
+  }
+  // Yahoo가 막혔거나 일부 실패하면 CNBC(US3M/US5Y/US10Y/US30Y)로 보충
+  const missing = BENCH_SERIES.filter(s => next[s.key] == null);
+  if (missing.length) {
+    try {
+      const got = await fetchQuotesCnbc(missing.map(s => s.ticker));
+      missing.forEach(s => { next[s.key] = got[s.ticker] ? got[s.ticker].price : null; });
+    } catch { missing.forEach(s => { next[s.key] = null; }); }
+  }
   bench = next;
   return bench;
 }
@@ -642,19 +747,23 @@ function renderBondHoldings(boxId, ctrl, emptyLabel) {
   if (!list.length) { box.innerHTML = `<div class="empty2">${emptyLabel}</div>`; return; }
   const enriched = list.map(h => {
     const nc = nextCouponDate(h.maturity);
-    return { ...h, nc, amt: h.face * h.coupon / 100 / 2, mv: h.face * h.price / 100, curYield: h.coupon / h.price * 100 };
+    return { ...h, nc, amt: h.face * h.coupon / 100 / 2, mv: h.face * h.price / 100 };
   }).sort((a, b) => (a.nc ? a.nc.getTime() : Infinity) - (b.nc ? b.nc.getTime() : Infinity));
   const totalMv = enriched.reduce((s, h) => s + h.mv, 0);
+  const totalAnnual = enriched.reduce((s, h) => s + h.amt * 2, 0);
   box.innerHTML = `
-    <div class="small" style="margin-bottom:10px">평가총액 $${fmtInt(totalMv)} (최근 입력가 기준)</div>
+    <div class="bondStats" style="margin:0 0 12px">
+      <div><span class="k">연 이자 합계 (세전)</span><span class="v hl">$${fmtInt(totalAnnual)}</span></div>
+      <div><span class="k">평가총액 (최근 입력가)</span><span class="v">$${fmtInt(totalMv)}</span></div>
+    </div>
     ${enriched.map(h => `
       <div class="bondCard">
         <div class="bondName">${escapeHtml(h.name)}</div>
         <div class="small">CUSIP ${escapeHtml(h.cusip)} · 쿠폰 ${fmt(h.coupon, 3)}% · 만기 ${h.maturity}</div>
         <div class="bondStats">
           <div><span class="k">다음 쿠폰</span><span class="v hl">${h.nc ? fmtDateShort(isoDate(h.nc)) : "-"}${h.nc ? ` (D-${daysUntil(h.nc)})` : ""}</span></div>
-          <div><span class="k">쿠폰금액</span><span class="v hl">$${fmt(h.amt, 2)}</span></div>
-          <div><span class="k">현재수익률</span><span class="v">${fmt(h.curYield)}%</span></div>
+          <div><span class="k">쿠폰금액 (반기)</span><span class="v hl">$${fmt(h.amt, 2)}</span></div>
+          <div><span class="k">연 이자</span><span class="v hl">$${fmt(h.amt * 2, 2)}</span></div>
           <div><span class="k">평가액</span><span class="v">$${fmtInt(h.mv)}</span></div>
         </div>
         <div class="bondFoot">
@@ -664,7 +773,7 @@ function renderBondHoldings(boxId, ctrl, emptyLabel) {
         </div>
       </div>
     `).join("")}
-    <p class="note">쿠폰 지급일은 만기 월·일 기준 6개월 간격 지급을 가정한 추정값입니다(실제와 다를 수 있음). 현재수익률 = 쿠폰금리 ÷ 현재가(만기수익률(YTM)과는 다른 단순 참고치). 가격은 자동조회가 안 돼서 직접 확인해 가끔 업데이트해주세요.</p>
+    <p class="note">쿠폰 지급일은 만기 월·일 기준 6개월 간격 지급을 가정한 추정값입니다(실제와 다를 수 있음). 이자 = 액면가 × 쿠폰금리(세전). 가격은 자동조회가 안 돼서 직접 확인해 가끔 업데이트해주세요.</p>
   `;
   $$("[data-price]", box).forEach(inp => inp.addEventListener("change", () => { ctrl.setPrice(inp.dataset.price, inp.value); renderBondHoldings(boxId, ctrl, emptyLabel); }));
   $$("[data-del]", box).forEach(b => b.addEventListener("click", () => { ctrl.delete(b.dataset.del); renderBondHoldings(boxId, ctrl, emptyLabel); }));
@@ -672,7 +781,6 @@ function renderBondHoldings(boxId, ctrl, emptyLabel) {
 function renderMuniHoldings() { renderBondHoldings("muniHoldBox", muniBonds, "등록된 보유 지방채가 없습니다"); }
 function renderGovBondHoldings() { renderBondHoldings("govHoldBox", govBonds, "등록된 보유 국채가 없습니다"); }
 function muniSkeleton() {
-  const c = LS.get("muniCalc", { fed: "32", state: "0", src: "irx", custom: "", check: "" });
   paneMuni.innerHTML = `
     <div class="card">
       <h2>보유 지방채</h2>
@@ -715,35 +823,13 @@ function muniSkeleton() {
       </div>
       <p class="note">지방채와 달리 이자소득이 연방·주 소득세 모두 과세대상입니다(주세는 면제인 경우가 많음).</p>
     </div>
-    <div class="card calc">
-      <h2>매수 기준선 (자동 계산)</h2>
-      <div class="f"><label>비교 기준</label>
-        <select id="mSrc">
-          ${BENCH_SERIES.map(s => `<option value="${s.key}">미국채 ${s.label} — <span id="mVal_${s.key}">…</span></option>`).join("")}
-          <option value="custom">직접 입력</option>
-        </select>
-      </div>
-      <div class="f" id="mCustomWrap" hidden><label>비교 수익률 (%)</label><input id="mCustom" type="number" step="0.01" inputmode="decimal" placeholder="예: 4.50" value="${c.custom}"></div>
-      <div class="two">
-        <div class="f"><label>연방 소득세율 (%)</label><input id="mFed" type="number" step="1" inputmode="decimal" value="${c.fed}"></div>
-        <div class="f"><label>주(State) 소득세율 (%)</label><input id="mState" type="number" step="1" inputmode="decimal" value="${c.state}"></div>
-      </div>
-      <div class="resultBox" id="mResult"><div class="small">불러오는 중…</div></div>
-      <p class="note">텍사스(TX)처럼 주소득세가 없으면 주 세율은 0으로 둡니다. AMT 대상 채권·NIIT 등은 반영하지 않은 단순 참고치이며 투자 조언이 아닙니다.</p>
+    <div class="card" id="treasCard">
+      <h2><span class="lbl">국채 고시 금리</span></h2>
+      <div class="status">불러오는 중…</div>
     </div>
-    <div class="card calc">
-      <h2>후보 종목 바로 확인</h2>
-      <div class="f"><label>확인하고 싶은 지방채 수익률 (%)</label><input id="mCheck" type="number" step="0.01" inputmode="decimal" placeholder="예: 3.80" value="${c.check}"></div>
-      <div class="resultBox" id="mCheckResult"><div class="small">수익률을 입력하면 기준선과 바로 비교해드려요</div></div>
-    </div>
-    <div class="row"><button class="btn sm" id="muniRefresh">미국채 수익률 새로고침</button></div>
-    <p class="disclaim">개별 지방채 매물 목록은 로그인 전용이라 이 앱이 직접 가져올 순 없습니다 — <a href="https://www.fidelity.com/fixed-income-bonds/municipal-bonds" target="_blank" rel="noopener">피델리티에서 찾기 ↗</a></p>
+    <div class="row"><button class="btn sm" id="muniRefresh">금리 새로고침</button></div>
+    <p class="disclaim">지방채는 공개로 고시되는 금리표가 없어서(발행처·만기·등급마다 제각각) 매물별 수익률은 <a href="https://www.fidelity.com/fixed-income-bonds/municipal-bonds" target="_blank" rel="noopener">피델리티 지방채 화면 ↗</a>에서 확인해주세요. 국채 금리는 미 재무부가 매 영업일 고시하는 수익률 곡선입니다.</p>
   `;
-  $("#mSrc").value = c.src;
-  $("#mCustomWrap").hidden = c.src !== "custom";
-  $("#mSrc").addEventListener("change", () => { $("#mCustomWrap").hidden = $("#mSrc").value !== "custom"; calcMuni(); });
-  ["mCustom", "mFed", "mState"].forEach(id => $("#" + id).addEventListener("input", calcMuni));
-  $("#mCheck").addEventListener("input", calcMuni);
   $("#muniRefresh").addEventListener("click", () => loadMuniBench(true));
   $("#muniHoldAddBtn").addEventListener("click", () => $("#muniHoldForm").classList.toggle("open"));
   $("#hSave").addEventListener("click", () => {
@@ -780,50 +866,54 @@ function muniSkeleton() {
   renderMuniHoldings();
   renderGovBondHoldings();
 }
-function muniThreshold() {
-  const fed = parseFloat($("#mFed").value) || 0;
-  const state = parseFloat($("#mState").value) || 0;
-  const src = $("#mSrc").value;
-  const base = src === "custom" ? parseFloat($("#mCustom").value) : bench[src];
-  LS.set("muniCalc", { fed: $("#mFed").value, state: $("#mState").value, src, custom: $("#mCustom").value, check: $("#mCheck").value });
-  if (!Number.isFinite(base)) return null;
-  const combo = Math.min(0.9, (fed + state) / 100);
-  return base * (1 - combo);
-}
-function calcMuni() {
-  BENCH_SERIES.forEach(s => {
-    const el = $("#mVal_" + s.key);
-    if (el) el.textContent = bench[s.key] != null ? fmt(bench[s.key]) + "%" : (bench.loadedAt ? "조회 실패" : "…");
-  });
-  const box = $("#mResult");
-  const th = muniThreshold();
-  if (th == null) {
-    box.innerHTML = `<div class="small">기준 수익률을 가져오지 못했습니다. 새로고침하거나 직접 입력을 선택하세요.</div>`;
-  } else {
-    box.innerHTML = `
-      <div class="big">${fmt(th)}%</div>
-      <div class="small">지방채 수익률이 이 이상이면, 세후 기준으로 선택한 미국채보다 유리합니다.</div>
-    `;
+// 미 재무부 고시 일별 수익률 곡선(CSV, 최신 영업일이 첫 줄). 막히면 Yahoo/CNBC 벤치마크(3개월·5년·10년·30년)로 대체
+const TREASURY_TENORS = [["1 Mo", "1개월"], ["3 Mo", "3개월"], ["6 Mo", "6개월"], ["1 Yr", "1년"], ["2 Yr", "2년"], ["5 Yr", "5년"], ["10 Yr", "10년"], ["20 Yr", "20년"], ["30 Yr", "30년"]];
+async function fetchTreasuryOfficial() {
+  const y = new Date().getUTCFullYear();
+  for (const year of [y, y - 1]) { // 연초엔 올해 파일이 비어 있을 수 있어 작년도 시도
+    const target = `https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${year}/all?type=daily_treasury_yield_curve&field_tdr_date_value=${year}&page&_format=csv`;
+    let csv;
+    try { csv = await fetchFirstOkText([[target], corsProxies(target)], 8000); } catch (e) { if (year === y - 1) throw e; continue; }
+    const lines = csv.trim().split(/\r?\n/);
+    if (lines.length < 2) continue;
+    const clean = l => l.split(",").map(x => x.replace(/"/g, "").trim());
+    const header = clean(lines[0]);
+    const row = clean(lines[1]);
+    const rates = {};
+    header.forEach((h, i) => { const v = parseFloat(row[i]); if (i > 0 && isFinite(v)) rates[h] = v; });
+    if (!Object.keys(rates).length) continue;
+    return { date: row[0], rates, src: "미 재무부 고시" };
   }
-  const cbox = $("#mCheckResult");
-  const y = parseFloat($("#mCheck").value);
-  if (!cbox) return;
-  if (!isFinite(y) || y <= 0) { cbox.innerHTML = `<div class="small">수익률을 입력하면 기준선과 바로 비교해드려요</div>`; return; }
-  if (th == null) { cbox.innerHTML = `<div class="small">기준선을 먼저 확인해주세요</div>`; return; }
-  const ok = y >= th;
-  const fed = parseFloat($("#mFed").value) || 0;
-  const state = parseFloat($("#mState").value) || 0;
-  const combo = Math.min(0.9, (fed + state) / 100);
-  const tey = y / (1 - combo);
-  cbox.innerHTML = `
-    <div class="big" style="color:${ok ? "var(--ok)" : "var(--danger)"}">${ok ? "✅ 기준 충족" : "❌ 기준 미달"}</div>
-    <div class="small">세후환산수익률(TEY): ${fmt(tey)}% — 과세상품으로 같은 세후소득을 받으려면 이 정도 금리가 필요합니다.</div>
+  throw new Error("재무부 금리표 없음");
+}
+let treasuryData = null;
+function renderTreasury() {
+  const card = $("#treasCard");
+  if (!card) return;
+  if (!treasuryData) {
+    card.innerHTML = `<h2><span class="lbl">국채 고시 금리</span></h2><div class="status err">금리를 가져오지 못했습니다. 새로고침 해주세요.</div>`;
+    return;
+  }
+  const rows = treasuryData.rows.filter(r => r.val != null);
+  card.innerHTML = `
+    <h2><span class="lbl">국채 고시 금리</span></h2>
+    <div class="small" style="margin-bottom:4px">${escapeHtml(treasuryData.src)}${treasuryData.date ? ` · ${escapeHtml(treasuryData.date)} 기준` : ""} · 연 %</div>
+    ${rows.map((r, i) => `<div class="etfRow" style="grid-template-columns:1fr auto;${i === 0 ? "border-top:0" : ""}"><div class="sym">${r.label}</div><div class="px">${fmt(r.val)}%</div></div>`).join("")}
   `;
 }
 async function loadMuniBench(force) {
   benchLoadedFor.muni = true;
-  try { await loadBenchmark(force); } catch {}
-  calcMuni();
+  try {
+    const t = await fetchTreasuryOfficial();
+    treasuryData = { src: t.src, date: t.date, rows: TREASURY_TENORS.map(([k, label]) => ({ label, val: t.rates[k] ?? null })) };
+  } catch {
+    try {
+      const b = await loadBenchmark(force);
+      const rows = BENCH_SERIES.map(s => ({ label: s.label, val: b[s.key] }));
+      treasuryData = rows.some(r => r.val != null) ? { src: "시세 소스(Yahoo/CNBC) 기준", date: "", rows } : null;
+    } catch { treasuryData = null; }
+  }
+  renderTreasury();
   setUpdated(nowLabel() + " 업데이트");
 }
 
@@ -837,7 +927,7 @@ function incomeSkeleton() {
     <div class="card" id="incMonths"><h2><span class="lbl">앞으로 12개월 월별 예상</span></h2><div class="status">불러오는 중…</div></div>
     <div class="card" id="incSources"><h2><span class="lbl">종목별 연간 예상 (세전)</span></h2><div class="status">불러오는 중…</div></div>
     <div class="row"><button class="btn sm" id="incRefresh">새로고침</button></div>
-    <p class="disclaim">ETF·주식 배당은 지난 1년 실제 지급 내역(날짜·주당 금액)이 다음 1년에도 그대로 반복된다고 가정하고 보유수량을 곱한 추정치입니다. 채권 쿠폰은 만기 월·일 기준 6개월 간격 지급 가정. 전부 세전이며 지방채 이자는 연방세 면제입니다. 수량은 ETF 탭에서, 채권은 지방채 탭에서 고칠 수 있어요.</p>
+    <p class="disclaim">ETF·주식 배당은 지난 1년 실제 지급 내역(날짜·주당 금액)이 다음 1년에도 그대로 반복된다고 가정하고 보유수량을 곱한 추정치입니다. 채권 쿠폰은 만기 월·일 기준 6개월 간격 지급 가정. 전부 세전이며 지방채 이자는 연방세 면제입니다. 수량은 ETF 탭에서, 채권은 채권 탭에서 고칠 수 있어요.</p>
   `;
   $("#incRefresh").addEventListener("click", () => loadIncome(true));
 }
