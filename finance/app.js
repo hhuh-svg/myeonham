@@ -472,8 +472,11 @@ function renderEtfRows(syms, data) {
       <div class="sym">${s}<button class="delbtn" data-del="${s}" style="margin-left:6px">삭제</button></div>
       <div class="px">$${fmt(d.price)}</div>
       ${pctCell(d.pct)}
-      <div class="nm">${escapeHtml(d.name || "")}</div>
-      ${parts.length ? `<div class="nm" style="color:var(--accent)">${parts.join(" · ")}</div>` : ""}
+      <div class="info">
+        <div class="nm">${escapeHtml(d.name || "")}</div>
+        ${parts.length ? `<div class="nm" style="color:var(--accent)">${parts.join(" · ")}</div>` : ""}
+      </div>
+      ${finHtml(d.fin)}
       ${qtyRow}
     </div>`;
   }).join("");
@@ -505,7 +508,7 @@ async function fetchQuote(symbol) {
   const divHistory = divEvents
     .map(e => ({ date: new Date(e.date * 1000).toISOString().slice(0, 10), amount: e.amount }))
     .sort((a, b) => b.date.localeCompare(a.date)); // 지난 1년 전체 — 배당 탭의 월별 예상 계산에 씀
-  return { price, pct: ((price - prev) / prev) * 100, name: r.meta.longName || r.meta.shortName || "", divHistory };
+  return { price, pct: ((price - prev) / prev) * 100, name: r.meta.longName || r.meta.shortName || "", divHistory, fin: pickFin(r.meta) };
 }
 function quoteSummaryUrls(symbol) {
   const target = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=summaryDetail`;
@@ -517,8 +520,11 @@ async function fetchDividend(symbol) {
   if (!sd) throw new Error("no dividend data");
   const y = sd.dividendYield && sd.dividendYield.raw;
   const r = sd.dividendRate && sd.dividendRate.raw;
-  if (y == null && r == null) throw new Error("no dividend");
-  return { yield: y != null ? y * 100 : null, rate: r != null ? r : null };
+  const raw = {};
+  Object.keys(sd).forEach(k => { raw[k] = sd[k] && typeof sd[k] === "object" && "raw" in sd[k] ? sd[k].raw : sd[k]; });
+  const fin = pickFin(raw);
+  if (y == null && r == null && !fin) throw new Error("no dividend");
+  return { yield: y != null ? y * 100 : null, rate: r != null ? r : null, fin };
 }
 // 배당 탭도 같은 조회 결과를 쓰므로, 진행 중인 조회 promise를 공유해 두 번 조회하지 않게 함
 let etfLoadPromise = null;
@@ -530,6 +536,57 @@ function ensureEtfLoaded() { return etfLoadPromise || loadEtf(); }
 const CNBC_MAP = { "^GSPC": ".SPX", "^IXIC": ".IXIC", "^IRX": "US3M", "^FVX": "US5Y", "^TNX": "US10Y", "^TYX": "US30Y" };
 const STOOQ_MAP = { "^GSPC": "^spx", "^IXIC": "^ndq" };
 function numLoose(s) { if (s == null) return null; const n = parseFloat(String(s).replace(/[,%+\s]/g, "")); return isFinite(n) ? n : null; }
+// 시세 응답에 같이 오는 재무정보 — 소스마다 키 이름이 달라 후보를 넓게 잡음(없으면 null)
+function firstVal(obj, keys) { for (const k of keys) { if (obj && obj[k] != null && obj[k] !== "") return obj[k]; } return null; }
+function pickFin(q) {
+  const fin = {
+    hi52: numLoose(firstVal(q, ["yrhiprice", "fiftyTwoWeekHigh", "52WeekHigh", "high52", "yearHigh"])),
+    lo52: numLoose(firstVal(q, ["yrloprice", "fiftyTwoWeekLow", "52WeekLow", "low52", "yearLow"])),
+    pe: numLoose(firstVal(q, ["pe", "peRatio", "trailingPE", "PE", "pe_ratio"])),
+    eps: numLoose(firstVal(q, ["eps", "EPS", "epsTTM", "TTMEPSXCLX"])),
+    beta: numLoose(firstVal(q, ["beta", "Beta"])),
+    mktcap: firstVal(q, ["mktcapView", "marketCapView", "mktcap", "marketCap", "market_cap"]),
+    vol: firstVal(q, ["volume", "regularMarketVolume", "vol"]),
+    open: numLoose(firstVal(q, ["open", "regularMarketOpen"])),
+    dayHi: numLoose(firstVal(q, ["high", "dayHigh", "regularMarketDayHigh"])),
+    dayLo: numLoose(firstVal(q, ["low", "dayLow", "regularMarketDayLow"]))
+  };
+  if (fin.mktcap != null && typeof fin.mktcap === "object" && "raw" in fin.mktcap) fin.mktcap = fin.mktcap.raw;
+  if (fin.vol != null && typeof fin.vol === "object" && "raw" in fin.vol) fin.vol = fin.vol.raw;
+  return Object.values(fin).some(v => v != null) ? fin : null;
+}
+function mergeFin(a, b) {
+  const out = { ...(a || {}) };
+  Object.entries(b || {}).forEach(([k, v]) => { if (v != null) out[k] = v; }); // null로 기존 값을 지우지 않음
+  return Object.keys(out).length ? out : null;
+}
+function fmtBig(v) {
+  if (v == null || v === "") return null;
+  if (typeof v === "string" && !/^\s*[\d,.]+\s*$/.test(v)) return v; // "1.23T" 같은 이미 포맷된 문자열
+  const n = typeof v === "number" ? v : parseFloat(String(v).replace(/,/g, ""));
+  if (!isFinite(n)) return null;
+  if (n >= 1e12) return (n / 1e12).toFixed(2) + "T";
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + "K";
+  return String(n);
+}
+function finHtml(fin) {
+  if (!fin) return "";
+  const lines = [];
+  if (fin.lo52 != null && fin.hi52 != null) lines.push(`52주 ${fmt(fin.lo52)}–${fmt(fin.hi52)}`);
+  const a = [];
+  if (fin.mktcap != null && fmtBig(fin.mktcap)) a.push(`시총 $${fmtBig(fin.mktcap)}`);
+  if (fin.pe != null) a.push(`PER ${fmt(fin.pe, 1)}`);
+  if (a.length) lines.push(a.join(" · "));
+  const b = [];
+  if (fin.eps != null) b.push(`EPS ${fmt(fin.eps)}`);
+  if (fin.beta != null) b.push(`β ${fmt(fin.beta)}`);
+  if (fin.vol != null && fmtBig(fin.vol)) b.push(`거래량 ${fmtBig(fin.vol)}`);
+  if (b.length) lines.push(b.join(" · "));
+  if (fin.dayLo != null && fin.dayHi != null) lines.push(`당일 ${fmt(fin.dayLo)}–${fmt(fin.dayHi)}`);
+  return lines.length ? `<div class="fin">${lines.map(escapeHtml).join("<br>")}</div>` : "";
+}
 async function fetchQuotesCnbc(symbols) {
   const list = symbols.map(s => CNBC_MAP[s] || s);
   const target = `https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=${encodeURIComponent(list.join("|"))}&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json`;
@@ -544,7 +601,7 @@ async function fetchQuotesCnbc(symbols) {
     if (price == null) return;
     const rate = numLoose(q.dividend ?? q.dividend_amount ?? q.annual_dividend);
     const yld = numLoose(q.dividendyield ?? q.dividend_yield ?? q.yield);
-    out[orig] = { price, pct: numLoose(q.change_pct), name: q.name || "", divHistory: [], src: "CNBC" };
+    out[orig] = { price, pct: numLoose(q.change_pct), name: q.name || "", divHistory: [], src: "CNBC", fin: pickFin(q) };
     if (rate != null || yld != null) out[orig].div = { rate, yield: yld };
   });
   if (!Object.keys(out).length) throw new Error("CNBC 시세 없음");
@@ -608,14 +665,14 @@ async function loadEtfInner() {
         try { data[sym] = await fetchQuote(sym); }
         catch { data[sym] = { error: true }; renderEtfRows(syms, data); return; }
         renderEtfRows(syms, data);
-        try { data[sym].div = await fetchDividend(sym); renderEtfRows(syms, data); } catch {}
+        try { const dv = await fetchDividend(sym); data[sym].div = dv; data[sym].fin = mergeFin(data[sym].fin, dv.fin); renderEtfRows(syms, data); } catch {}
       }),
       mapWithConcurrency(INDEX_TICKERS, 2, async ({ sym }) => {
         try { idata[sym] = await fetchQuote(sym); }
         catch { idata[sym] = { error: true }; }
         renderIndexRows(idata);
       }),
-      (async () => { try { data[syms[0]].div = await fetchDividend(syms[0]); renderEtfRows(syms, data); } catch {} })()
+      (async () => { try { const dv = await fetchDividend(syms[0]); data[syms[0]].div = dv; data[syms[0]].fin = mergeFin(data[syms[0]].fin, dv.fin); renderEtfRows(syms, data); } catch {} })()
     ]);
   }
   const failedSyms = syms.filter(s => !data[s] || data[s].error);
