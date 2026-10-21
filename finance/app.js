@@ -864,7 +864,7 @@ function newsSkeleton() {
   `;
   $("#newsRefresh").addEventListener("click", () => loadNews(true));
 }
-async function fetchFeed(url, ms = 8000) {
+async function fetchFeed(url, ms = 5000) {
   const urls = [url, ...corsProxies(url)];
   const xml = await fetchFirstOkText(urls, ms);
   const doc = new DOMParser().parseFromString(xml, "application/xml");
