@@ -581,8 +581,8 @@ function renderBondHoldings(boxId, ctrl, emptyLabel) {
   const totalMv = enriched.reduce((s, h) => s + h.mv, 0);
   box.innerHTML = `
     <div class="small" style="margin-bottom:10px">평가총액 $${fmtInt(totalMv)} (최근 입력가 기준)</div>
-    ${enriched.map((h, i) => `
-      <div class="bondCard${i === 0 ? " nearest" : ""}">
+    ${enriched.map(h => `
+      <div class="bondCard">
         <div class="bondName">${escapeHtml(h.name)}</div>
         <div class="small">CUSIP ${escapeHtml(h.cusip)} · 쿠폰 ${fmt(h.coupon, 3)}% · 만기 ${h.maturity}</div>
         <div class="bondStats">
