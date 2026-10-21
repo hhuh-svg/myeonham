@@ -64,6 +64,20 @@ function corsProxies(target) {
     `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`
   ];
 }
+// 한꺼번에 너무 많은 요청을 쏘면 브라우저 호스트당 연결 수 제한에 걸려
+// 다른 탭의 요청까지 줄서서 느려지므로, 동시 실행 개수를 제한해서 처리
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let idx = 0;
+  async function worker() {
+    while (idx < items.length) {
+      const i = idx++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
 
 // =========================================================
 // 탭 전환
@@ -454,13 +468,13 @@ async function loadEtf() {
   const idata = {};
   lastEtfData = data;
   await Promise.all([
-    ...syms.map(async sym => {
+    mapWithConcurrency(syms, 4, async sym => {
       try { data[sym] = await fetchQuote(sym); }
       catch { data[sym] = { error: true }; renderEtfRows(syms, data); return; }
       renderEtfRows(syms, data);
       try { data[sym].div = await fetchDividend(sym); renderEtfRows(syms, data); } catch {}
     }),
-    ...INDEX_TICKERS.map(async ({ sym }) => {
+    mapWithConcurrency(INDEX_TICKERS, 2, async ({ sym }) => {
       try { idata[sym] = await fetchQuote(sym); }
       catch { idata[sym] = { error: true }; }
       renderIndexRows(idata);
