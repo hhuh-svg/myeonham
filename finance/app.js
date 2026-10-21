@@ -192,7 +192,9 @@ async function loadFx(force) {
     let rate = null, days = [], history = [], prevRate = null;
     const errs = [];
     try {
-      const series = await fetchJSON(`https://api.frankfurter.app/${iso(back)}..${iso(today)}?from=USD&to=KRW`);
+      // 기간이 길수록(최대 3년) 응답이 커서 느릴 수 있어 타임아웃을 넉넉히 둠
+      const rangeTimeout = 8000 + FX_PERIOD_DAYS[fxPeriod] * 10;
+      const series = await fetchJSON(`https://api.frankfurter.app/${iso(back)}..${iso(today)}?from=USD&to=KRW`, rangeTimeout);
       days = Object.keys(series.rates || {}).sort();
       history = days.map(d => series.rates[d].KRW);
       if (history.length) {
@@ -547,15 +549,16 @@ function renderBondHoldings(boxId, ctrl, emptyLabel) {
   if (!box) return;
   const list = ctrl.load();
   if (!list.length) { box.innerHTML = `<div class="empty2">${emptyLabel}</div>`; return; }
-  const enriched = list.map(h => ({ ...h, mv: h.face * h.price / 100 })).sort((a, b) => b.mv - a.mv);
+  const enriched = list.map(h => ({ ...h, mv: h.face * h.price / 100, curYield: h.coupon / h.price * 100 })).sort((a, b) => b.mv - a.mv);
   const totalMv = enriched.reduce((s, h) => s + h.mv, 0);
   box.innerHTML = `
     <div class="small" style="margin-bottom:10px">평가총액 $${fmtInt(totalMv)} (최근 입력가 기준)</div>
     ${enriched.map(h => `
       <div class="bondCard">
         <div class="bondName">${escapeHtml(h.name)}</div>
-        <div class="small">CUSIP ${escapeHtml(h.cusip)} · ${fmt(h.coupon, 3)}% · 만기 ${h.maturity}</div>
+        <div class="small">CUSIP ${escapeHtml(h.cusip)} · 쿠폰 ${fmt(h.coupon, 3)}% · 만기 ${h.maturity}</div>
         <div class="bondStats">
+          <div><span class="k">현재수익률</span><span class="v">${fmt(h.curYield)}%</span></div>
           <div><span class="k">평가액</span><span class="v">$${fmtInt(h.mv)}</span></div>
         </div>
         <div class="bondFoot">
@@ -565,7 +568,7 @@ function renderBondHoldings(boxId, ctrl, emptyLabel) {
         </div>
       </div>
     `).join("")}
-    <p class="note">개별 채권 가격은 자동조회가 안 돼서 직접 확인해 가끔 업데이트해주세요.</p>
+    <p class="note">현재수익률 = 쿠폰금리 ÷ 현재가(단순 참고치, 만기수익률(YTM)과는 다름). 개별 채권 가격은 자동조회가 안 돼서 직접 확인해 가끔 업데이트해주세요.</p>
   `;
   $$("[data-price]", box).forEach(inp => inp.addEventListener("change", () => { ctrl.setPrice(inp.dataset.price, inp.value); renderBondHoldings(boxId, ctrl, emptyLabel); }));
   $$("[data-del]", box).forEach(b => b.addEventListener("click", () => { ctrl.delete(b.dataset.del); renderBondHoldings(boxId, ctrl, emptyLabel); }));
