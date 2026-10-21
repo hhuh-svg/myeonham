@@ -200,6 +200,28 @@ async function fetchFxHistoryYahoo(backDate) {
   if (!history.length) throw new Error("빈 응답");
   return { days, history };
 }
+// frankfurter·Yahoo가 둘 다 막힌 환경용 마지막 수단: jsDelivr CDN(진단에서 유일하게 확실히 열려 있던 호스트)에
+// 날짜별로 올라가 있는 환율 파일(@fawazahmed0/currency-api@YYYY-MM-DD)을 하루씩 모아 차트를 만든다.
+// 파일 하나가 하루치라 기간이 길면 요청이 많아지므로 최대 ~60개 지점만 샘플링.
+async function fetchFxHistoryJsdelivr(backDate, today) {
+  const totalDays = Math.max(1, Math.round((today - backDate) / 86400000));
+  const step = Math.max(1, Math.ceil(totalDays / 60));
+  const dates = [];
+  for (let d = new Date(backDate); d <= today; d = new Date(d.getTime() + step * 86400000)) dates.push(d.toISOString().slice(0, 10));
+  const todayIso = today.toISOString().slice(0, 10);
+  if (dates[dates.length - 1] !== todayIso) dates.push(todayIso);
+  const points = await mapWithConcurrency(dates, 6, async date => {
+    try {
+      const j = await fetchJSON(`https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@${date}/v1/currencies/usd.min.json`, 5000);
+      const v = j && j.usd && j.usd.krw;
+      return v != null ? { date, v } : null;
+    } catch { return null; } // 주말·휴일 등 그 날짜 파일이 없으면 건너뜀
+  });
+  const ok = points.filter(Boolean);
+  if (ok.length < 2) throw new Error("jsDelivr 날짜별 파일 없음");
+  return { days: ok.map(p => p.date), history: ok.map(p => p.v) };
+}
+function fxCacheSave(data) { LS.set("fxLast", { ...data, at: Date.now() }); }
 async function loadFx(force) {
   fxLoaded = true;
   const card = $("#fxCard");
@@ -210,10 +232,18 @@ async function loadFx(force) {
     const iso = d => d.toISOString().slice(0, 10);
     let rate = null, days = [], history = [], prevRate = null;
     const errs = [];
-    // 1단계: 과거 기록이 있는 소스(frankfurter 기간, Yahoo FX)를 동시에 시도해 먼저 응답하는 쪽 채택
+    // 1단계: 과거 기록이 있는 소스(frankfurter 기간, Yahoo FX)를 동시에 시도해 먼저 응답하는 쪽 채택.
+    // 1.5초 안에 아무도 응답 못 하면(이 사용자 환경처럼 둘 다 막힌 경우) jsDelivr 날짜별 파일 조립을
+    // 같이 출발시킴 — 정상 환경에선 frankfurter가 0.2초 안에 끝나 jsDelivr 요청은 아예 안 나감
     try {
       const rangeTimeout = 5000 + FX_PERIOD_DAYS[fxPeriod] * 5; // 기간이 길수록(최대 3년) 응답이 커서 느릴 수 있어 타임아웃을 넉넉히 둠
+      let settled = false;
       const r = await raceOk([
+        async () => {
+          await new Promise(res => setTimeout(res, 1500));
+          if (settled) throw new Error("skip");
+          return fetchFxHistoryJsdelivr(back, today);
+        },
         async () => {
           const series = await fetchJSON(`https://api.frankfurter.app/${iso(back)}..${iso(today)}?from=USD&to=KRW`, rangeTimeout);
           const d = Object.keys(series.rates || {}).sort();
@@ -226,7 +256,7 @@ async function loadFx(force) {
           if (!yf.history.length) throw new Error("빈 응답");
           return yf;
         }
-      ]);
+      ]).finally(() => { settled = true; });
       days = r.days; history = r.history;
       rate = history[history.length - 1];
       prevRate = history.length > 1 ? history[history.length - 2] : null;
@@ -242,41 +272,20 @@ async function loadFx(force) {
       } catch (e) { errs.push("현재가 조회: " + e.message); }
     }
     if (rate == null) { const err = new Error("환율 조회 실패"); err.detail = errs.join(" / "); throw err; }
-    fxRate = rate;
-    const chg = prevRate != null ? rate - prevRate : null;
-    const chgPct = prevRate != null ? (chg / prevRate) * 100 : null;
-    const hasChart = history.length > 2;
-    const hi = hasChart ? Math.max(...history) : null;
-    const lo = hasChart ? Math.min(...history) : null;
-    const periodChg = hasChart ? ((history[history.length - 1] - history[0]) / history[0]) * 100 : null;
-    card.innerHTML = `
-      <h2><span class="lbl">USD → KRW</span></h2>
-      <div class="fxRate">
-        <span class="num">₩${fmt(rate)}</span>
-        ${chg != null ? `<span class="chg ${chg >= 0 ? "pos" : "neg"}">${chg >= 0 ? "▲" : "▼"} ${fmt(Math.abs(chg))} (${fmt(Math.abs(chgPct))}%) 전일대비</span>` : ""}
-      </div>
-      <div class="fxSub">1 USD 기준 · 중간시장가 참고용</div>
-      <div class="segrow" id="fxPeriodRow">
-        ${FX_PERIODS.map(p => `<button class="seg" data-p="${p}" aria-pressed="${p === fxPeriod}">${FX_PERIOD_LABELS[p]}</button>`).join("")}
-      </div>
-      ${hasChart ? `
-        <div class="chartMeta">
-          <span>고 ₩${fmt(hi)}</span>
-          <span class="${periodChg >= 0 ? "pos" : "neg"}">${FX_PERIOD_LABELS[fxPeriod]} ${periodChg >= 0 ? "▲" : "▼"} ${fmt(Math.abs(periodChg))}%</span>
-          <span>저 ₩${fmt(lo)}</span>
-        </div>
-        ${sparkSVG(history, 320, 110)}
-        <div class="chartDates"><span>${fmtDateShort(days[0])}</span><span>${fmtDateShort(days[days.length - 1])}</span></div>
-      ` : `<div class="small" style="margin-top:8px">차트 데이터를 가져오지 못했습니다.</div>`}
-    `;
-    $$("#fxPeriodRow .seg").forEach(b => b.addEventListener("click", () => {
-      fxPeriod = b.dataset.p;
-      LS.set("fxPeriod", fxPeriod);
-      loadFx(true);
-    }));
-    convertFrom("usd"); convertFrom("krw");
+    const data = { rate, days, history, prevRate, period: fxPeriod };
+    fxCacheSave(data);
+    renderFx(card, data, "");
     setUpdated(nowLabel() + " 업데이트");
   } catch (e) {
+    // 전부 실패해도 마지막으로 성공했던 값이 있으면 그걸 보여줌(빈 화면보다 낫다)
+    const cached = LS.get("fxLast", null);
+    if (cached && cached.rate != null) {
+      const ago = Math.round((Date.now() - cached.at) / 60000);
+      const agoText = ago < 60 ? ago + "분 전" : ago < 1440 ? Math.round(ago / 60) + "시간 전" : Math.round(ago / 1440) + "일 전";
+      renderFx(card, cached, `지금은 조회가 안 돼서 마지막 성공값(${agoText}, ${FX_PERIOD_LABELS[cached.period] || ""} 기준)을 보여드려요. 새로고침으로 다시 시도.`);
+      toast("환율 실시간 조회 실패 — 마지막 값 표시");
+      return;
+    }
     card.innerHTML = `
       <h2><span class="lbl">USD → KRW</span></h2>
       <div class="status err">환율 조회 실패. 네트워크를 확인하고 새로고침 해주세요.</div>
@@ -284,6 +293,43 @@ async function loadFx(force) {
     `;
     toast("환율 조회 실패");
   }
+}
+function renderFx(card, { rate, days, history, prevRate, period }, staleNote) {
+  fxRate = rate;
+  const periodLabel = FX_PERIOD_LABELS[period] || FX_PERIOD_LABELS[fxPeriod];
+  const chg = prevRate != null ? rate - prevRate : null;
+  const chgPct = prevRate != null ? (chg / prevRate) * 100 : null;
+  const hasChart = history.length > 2;
+  const hi = hasChart ? Math.max(...history) : null;
+  const lo = hasChart ? Math.min(...history) : null;
+  const periodChg = hasChart ? ((history[history.length - 1] - history[0]) / history[0]) * 100 : null;
+  card.innerHTML = `
+    <h2><span class="lbl">USD → KRW</span></h2>
+    ${staleNote ? `<div class="status err" style="margin-bottom:6px">${escapeHtml(staleNote)}</div>` : ""}
+    <div class="fxRate">
+      <span class="num">₩${fmt(rate)}</span>
+      ${chg != null ? `<span class="chg ${chg >= 0 ? "pos" : "neg"}">${chg >= 0 ? "▲" : "▼"} ${fmt(Math.abs(chg))} (${fmt(Math.abs(chgPct))}%) 전일대비</span>` : ""}
+    </div>
+    <div class="fxSub">1 USD 기준 · 중간시장가 참고용</div>
+    <div class="segrow" id="fxPeriodRow">
+      ${FX_PERIODS.map(p => `<button class="seg" data-p="${p}" aria-pressed="${p === fxPeriod}">${FX_PERIOD_LABELS[p]}</button>`).join("")}
+    </div>
+    ${hasChart ? `
+      <div class="chartMeta">
+        <span>고 ₩${fmt(hi)}</span>
+        <span class="${periodChg >= 0 ? "pos" : "neg"}">${periodLabel} ${periodChg >= 0 ? "▲" : "▼"} ${fmt(Math.abs(periodChg))}%</span>
+        <span>저 ₩${fmt(lo)}</span>
+      </div>
+      ${sparkSVG(history, 320, 110)}
+      <div class="chartDates"><span>${fmtDateShort(days[0])}</span><span>${fmtDateShort(days[days.length - 1])}</span></div>
+    ` : `<div class="small" style="margin-top:8px">차트 데이터를 가져오지 못했습니다.</div>`}
+  `;
+  $$("#fxPeriodRow .seg").forEach(b => b.addEventListener("click", () => {
+    fxPeriod = b.dataset.p;
+    LS.set("fxPeriod", fxPeriod);
+    loadFx(true);
+  }));
+  convertFrom("usd"); convertFrom("krw");
 }
 
 // =========================================================
