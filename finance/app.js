@@ -544,20 +544,41 @@ if (LS.get("govBondVersion", 0) !== GOV_BOND_VERSION) {
   LS.set("govBondVersion", GOV_BOND_VERSION);
 }
 const govBonds = createBondHoldings("govBondHoldings", DEFAULT_GOV_BOND_HOLDINGS);
+function isoDate(d) { return d.toISOString().slice(0, 10); }
+function daysUntil(d) { const t0 = new Date(); const t = new Date(Date.UTC(t0.getUTCFullYear(), t0.getUTCMonth(), t0.getUTCDate())); return Math.round((d.getTime() - t.getTime()) / 86400000); }
+// 공시된 다음 쿠폰일이 없을 때, 만기 월/일 기준 6개월 간격 지급을 가정해 다음 지급일을 추정
+function nextCouponDate(maturityISO) {
+  const [, mmStr, mdStr] = maturityISO.split("-");
+  const mm = parseInt(mmStr, 10), md = parseInt(mdStr, 10);
+  const now = new Date();
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const candidates = [];
+  for (let yOff = -1; yOff <= 1; yOff++) {
+    const y = now.getUTCFullYear() + yOff;
+    [[mm, y], [((mm + 5) % 12) + 1, mm + 6 > 12 ? y + 1 : y]].forEach(([m, yy]) => candidates.push(new Date(Date.UTC(yy, m - 1, md))));
+  }
+  const future = candidates.filter(d => d.getTime() > today.getTime()).sort((a, b) => a - b);
+  return future[0] || null;
+}
 function renderBondHoldings(boxId, ctrl, emptyLabel) {
   const box = $("#" + boxId);
   if (!box) return;
   const list = ctrl.load();
   if (!list.length) { box.innerHTML = `<div class="empty2">${emptyLabel}</div>`; return; }
-  const enriched = list.map(h => ({ ...h, mv: h.face * h.price / 100, curYield: h.coupon / h.price * 100 })).sort((a, b) => b.mv - a.mv);
+  const enriched = list.map(h => {
+    const nc = nextCouponDate(h.maturity);
+    return { ...h, nc, amt: h.face * h.coupon / 100 / 2, mv: h.face * h.price / 100, curYield: h.coupon / h.price * 100 };
+  }).sort((a, b) => (a.nc ? a.nc.getTime() : Infinity) - (b.nc ? b.nc.getTime() : Infinity));
   const totalMv = enriched.reduce((s, h) => s + h.mv, 0);
   box.innerHTML = `
     <div class="small" style="margin-bottom:10px">평가총액 $${fmtInt(totalMv)} (최근 입력가 기준)</div>
-    ${enriched.map(h => `
-      <div class="bondCard">
+    ${enriched.map((h, i) => `
+      <div class="bondCard${i === 0 ? " nearest" : ""}">
         <div class="bondName">${escapeHtml(h.name)}</div>
         <div class="small">CUSIP ${escapeHtml(h.cusip)} · 쿠폰 ${fmt(h.coupon, 3)}% · 만기 ${h.maturity}</div>
         <div class="bondStats">
+          <div><span class="k">다음 쿠폰</span><span class="v">${h.nc ? fmtDateShort(isoDate(h.nc)) : "-"}${h.nc ? ` (D-${daysUntil(h.nc)})` : ""}</span></div>
+          <div><span class="k">쿠폰금액</span><span class="v">$${fmt(h.amt, 2)}</span></div>
           <div><span class="k">현재수익률</span><span class="v">${fmt(h.curYield)}%</span></div>
           <div><span class="k">평가액</span><span class="v">$${fmtInt(h.mv)}</span></div>
         </div>
@@ -568,7 +589,7 @@ function renderBondHoldings(boxId, ctrl, emptyLabel) {
         </div>
       </div>
     `).join("")}
-    <p class="note">현재수익률 = 쿠폰금리 ÷ 현재가(단순 참고치, 만기수익률(YTM)과는 다름). 개별 채권 가격은 자동조회가 안 돼서 직접 확인해 가끔 업데이트해주세요.</p>
+    <p class="note">쿠폰 지급일은 만기 월·일 기준 6개월 간격 지급을 가정한 추정값입니다(실제와 다를 수 있음). 현재수익률 = 쿠폰금리 ÷ 현재가(만기수익률(YTM)과는 다른 단순 참고치). 가격은 자동조회가 안 돼서 직접 확인해 가끔 업데이트해주세요.</p>
   `;
   $$("[data-price]", box).forEach(inp => inp.addEventListener("change", () => { ctrl.setPrice(inp.dataset.price, inp.value); renderBondHoldings(boxId, ctrl, emptyLabel); }));
   $$("[data-del]", box).forEach(b => b.addEventListener("click", () => { ctrl.delete(b.dataset.del); renderBondHoldings(boxId, ctrl, emptyLabel); }));
