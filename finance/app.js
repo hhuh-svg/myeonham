@@ -785,7 +785,7 @@ async function loadMuniBench(force) {
 const paneCd = $("#pane-cd");
 function cdSkeleton() {
   paneCd.innerHTML = `
-    <div class="card" id="cdRatesCard_fidelity"><h2><span class="lbl">피델리티 CD 금리 (실시간 시도)</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="card"><h2><span class="lbl">피델리티 CD 금리</span></h2><div class="small">피델리티 CD 페이지는 자바스크립트로 그려지는 화면이라 자동으로 숫자를 가져올 수 없습니다. 아래 "피델리티" 버튼으로 직접 확인해주세요.</div></div>
     <div class="card" id="cdRatesCard_chase"><h2><span class="lbl">체이스 CD 금리 (실시간 시도)</span></h2><div class="status">불러오는 중…</div></div>
     <div class="card" id="cdBenchCard"><h2><span class="lbl">금리</span></h2><div class="status">불러오는 중…</div></div>
     <div class="row"><button class="btn sm" id="cdRefresh">새로고침</button></div>
@@ -873,8 +873,9 @@ async function scrapeCdRates(target) {
   if (!found.length) throw new Error("금리표를 찾지 못함 (페이지가 자바스크립트로 그려지는 경우일 수 있음)");
   return found;
 }
+// 피델리티는 자바스크립트로 그려지는 화면이라 원문 HTML에 숫자가 없어 실시간 조회가 원천적으로
+// 불가능 — 매번 시도하고 실패 메시지를 보여주는 건 의미가 없어 CD_SOURCES에서 제외(위 안내 카드로 대체)
 const CD_SOURCES = [
-  { key: "fidelity", label: "피델리티", url: "https://www.fidelity.com/fixed-income-bonds/cds/new-issue-cds" },
   { key: "chase", label: "체이스", url: "https://www.chase.com/personal/savings/bank-cd" }
 ];
 let cdRatesLoadedOnce = false;
