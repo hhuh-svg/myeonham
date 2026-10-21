@@ -767,10 +767,16 @@ async function loadMuniBench(force) {
 const paneCd = $("#pane-cd");
 function cdSkeleton() {
   paneCd.innerHTML = `
-    <div class="card" id="cdRatesCard"><h2><span class="lbl">피델리티 CD 금리 (실시간 시도)</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="card" id="cdRatesCard_fidelity"><h2><span class="lbl">피델리티 CD 금리 (실시간 시도)</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="card" id="cdRatesCard_chase"><h2><span class="lbl">체이스 CD 금리 (실시간 시도)</span></h2><div class="status">불러오는 중…</div></div>
     <div class="card" id="cdBenchCard"><h2><span class="lbl">금리</span></h2><div class="status">불러오는 중…</div></div>
     <div class="row"><button class="btn sm" id="cdRefresh">새로고침</button></div>
-    <p class="disclaim">브로커드 CD는 발행사·물량에 따라 보통 같은 만기 미국채보다 0.1~0.3%p 정도 높게 나오는 경우가 많습니다(시장 상황에 따라 다를 수 있음). 정확한 최신 금리는 <a href="https://www.fidelity.com/fixed-income-bonds/cds/new-issue-cds" target="_blank" rel="noopener">피델리티에서 직접 확인 ↗</a></p>
+    <div class="row">
+      <a class="btn sm" href="https://www.fidelity.com/fixed-income-bonds/cds/new-issue-cds" target="_blank" rel="noopener">피델리티</a>
+      <a class="btn sm" href="https://www.chase.com/personal/savings/bank-cd" target="_blank" rel="noopener">체이스</a>
+      <a class="btn sm" href="https://robinhood.com/us/en/support/articles/brokerage-cash-sweep/" target="_blank" rel="noopener">로빈후드(현금이자)</a>
+    </div>
+    <p class="disclaim">브로커드 CD는 발행사·물량에 따라 보통 같은 만기 미국채보다 0.1~0.3%p 정도 높게 나오는 경우가 많습니다(시장 상황에 따라 다를 수 있음). 로빈후드는 개별 CD·채권 상품이 없고 현금에 이자를 주는 방식이라 성격이 달라요 — 위 링크는 그 현금이자 안내 페이지입니다.</p>
   `;
   $("#cdRefresh").addEventListener("click", () => { loadCdBench(true); loadCdRates(true); });
 }
@@ -816,10 +822,9 @@ async function loadCdBench(force) {
   renderCdBench();
   setUpdated(nowLabel() + " 업데이트");
 }
-// 피델리티 공개 CD 페이지에서 금리표를 직접 긁어오는 시도. 로그인 없이 보이는 화면이 JS로
+// 은행/증권사 공개 CD 페이지에서 금리표를 직접 긁어오는 시도. 로그인 없이 보이는 화면이 JS로
 // 렌더링되는 경우(흔함) 원문 HTML에는 숫자가 없어서 실패할 수 있음 — 그럴 땐 벤치마크로 대체.
-async function fetchFidelityCdRates() {
-  const target = "https://www.fidelity.com/fixed-income-bonds/cds/new-issue-cds";
+async function scrapeCdRates(target) {
   const urls = [...corsProxies(target), `https://r.jina.ai/${target}`];
   const html = await fetchFirstOkText(urls, 9000);
   const text = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ");
@@ -836,28 +841,36 @@ async function fetchFidelityCdRates() {
   if (!found.length) throw new Error("금리표를 찾지 못함 (페이지가 자바스크립트로 그려지는 경우일 수 있음)");
   return found;
 }
+const CD_SOURCES = [
+  { key: "fidelity", label: "피델리티", url: "https://www.fidelity.com/fixed-income-bonds/cds/new-issue-cds" },
+  { key: "chase", label: "체이스", url: "https://www.chase.com/personal/savings/bank-cd" }
+];
 let cdRatesLoadedOnce = false;
-async function loadCdRates(force) {
-  if (cdRatesLoadedOnce && !force) return;
-  cdRatesLoadedOnce = true;
-  const card = $("#cdRatesCard");
-  card.innerHTML = `<h2><span class="lbl">피델리티 CD 금리 (실시간 시도)</span></h2><div class="status">불러오는 중…</div>`;
+async function loadOneCdSource(src) {
+  const card = $("#cdRatesCard_" + src.key);
+  if (!card) return;
+  card.innerHTML = `<h2><span class="lbl">${src.label} CD 금리 (실시간 시도)</span></h2><div class="status">불러오는 중…</div>`;
   try {
-    const rates = await fetchFidelityCdRates();
+    const rates = await scrapeCdRates(src.url);
     rates.sort((a, b) => b.apy - a.apy);
     card.innerHTML = `
-      <h2><span class="lbl">피델리티 CD 금리 (실시간 시도)</span></h2>
+      <h2><span class="lbl">${src.label} CD 금리 (실시간 시도)</span></h2>
       ${rates.map((r, i) => `<div class="etfRow" style="grid-template-columns:1fr auto auto;${i === 0 ? "border-top:0" : ""}"><div class="sym">${escapeHtml(r.term)}</div><div class="px">${fmt(r.apy)}%</div><div></div></div>`).join("")}
-      <p class="note">피델리티 공개 페이지를 그대로 긁어온 값이라 표시 오류가 있을 수 있어요. 실제 매수 전엔 꼭 피델리티 앱에서 재확인하세요.</p>
+      <p class="note">${src.label} 공개 페이지를 그대로 긁어온 값이라 표시 오류가 있을 수 있어요. 실제 매수/가입 전엔 꼭 ${src.label} 앱에서 재확인하세요.</p>
     `;
   } catch (e) {
     card.innerHTML = `
-      <h2><span class="lbl">피델리티 CD 금리 (실시간 시도)</span></h2>
+      <h2><span class="lbl">${src.label} CD 금리 (실시간 시도)</span></h2>
       <div class="status err">자동으로 가져오지 못했습니다.</div>
       <div class="small" style="margin-top:4px;word-break:break-all">사유: ${escapeHtml(e.message)}</div>
-      <p class="note">아래 미국채 벤치마크를 참고하거나, 피델리티에서 직접 확인해주세요.</p>
+      <p class="note">아래 미국채 벤치마크를 참고하거나, ${src.label}에서 직접 확인해주세요.</p>
     `;
   }
+}
+async function loadCdRates(force) {
+  if (cdRatesLoadedOnce && !force) return;
+  cdRatesLoadedOnce = true;
+  await mapWithConcurrency(CD_SOURCES, 2, loadOneCdSource);
 }
 
 // =========================================================
