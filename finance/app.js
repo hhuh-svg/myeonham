@@ -849,7 +849,35 @@ function renderGovBondHoldings() { renderBondHoldings("govHoldBox", govBonds, "�
 const DEFAULT_MMF = { ticker: "MJMXX", name: "JPMorgan Municipal Money Market (Morgan)", balance: 1270013.88, yield: null };
 const MMF_VERSION = 1;
 if (LS.get("mmfVersion", 0) !== MMF_VERSION) { LS.set("mmf", DEFAULT_MMF); LS.set("mmfVersion", MMF_VERSION); }
-let mmfAutoYield = null;
+let mmfAutoYield = null, mmfAutoSrc = "", mmfAutoErr = "";
+// MMF 7일 수익률 자동 조회: 시세 API(CNBC 등)는 MMF 수익률을 안 주므로, 펀드 요약 페이지(Yahoo·Google Finance)를
+// 프록시/jina 리더로 받아 "Yield x.xx%"를 찾는다. 되는 소스가 하나만 있으면 됨(동시에 시도, 30일 캐시).
+async function fetchMmfYieldAuto(ticker) {
+  const cached = LS.get("mmfYieldAuto", null);
+  const parse = (text, src) => {
+    const t = String(text).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ");
+    const m = t.match(/\b(?:7[- ]?day\s+)?(?:sec\s+)?yield\b[^%\d]{0,40}?(\d{1,2}\.\d{1,3})\s*%/i);
+    const v = m ? parseFloat(m[1]) : NaN;
+    if (!(v > 0 && v < 10)) throw new Error(src + ": 수익률 못 찾음");
+    return { yield: v, src };
+  };
+  const yPage = `https://finance.yahoo.com/quote/${encodeURIComponent(ticker)}/`;
+  const gPage = `https://www.google.com/finance/quote/${encodeURIComponent(ticker)}:MUTF`;
+  const tasks = [
+    () => fetchText(`https://r.jina.ai/${yPage}`, 15000).then(t => parse(t, "Yahoo(jina)")),
+    () => fetchText(`https://r.jina.ai/${gPage}`, 15000).then(t => parse(t, "Google(jina)")),
+    ...corsProxies(gPage).map(u => () => fetchText(u, 10000).then(t => parse(t, "Google"))),
+    ...corsProxies(yPage).map(u => () => fetchText(u, 10000).then(t => parse(t, "Yahoo")))
+  ];
+  try {
+    const r = await raceOk(tasks);
+    LS.set("mmfYieldAuto", { ...r, at: Date.now() });
+    return r;
+  } catch (e) {
+    if (cached && cached.yield && Date.now() - cached.at < 30 * 86400000) return { ...cached, stale: true };
+    throw e;
+  }
+}
 function mmfGet() { return { ...DEFAULT_MMF, ...(LS.get("mmf", {}) || {}) }; }
 function mmfYield() { const m = mmfGet(); return Number.isFinite(m.yield) && m.yield > 0 ? m.yield : mmfAutoYield; }
 function renderMmf() {
@@ -868,7 +896,9 @@ function renderMmf() {
       <div><span class="k">잔액 ($)</span><input class="qtyInput" id="mmfBalance" type="number" step="0.01" inputmode="decimal" value="${m.balance}"></div>
       <div><span class="k">7일 수익률 (연 %)</span><input class="qtyInput" id="mmfYield" type="number" step="0.01" inputmode="decimal" placeholder="${mmfAutoYield != null ? "자동 " + fmt(mmfAutoYield) : "직접 입력"}" value="${manual ? m.yield : ""}"></div>
     </div>
-    <p class="note">${y == null ? "수익률을 자동으로 못 가져왔어요 — 피델리티 MMF 화면의 7-day yield를 입력해주세요." : (manual ? "직접 입력한 수익률 기준." : "CNBC에서 가져온 수익률 기준(직접 입력하면 그 값을 우선).")} 이자는 매일 쌓여 월말에 지급된다고 가정. 지방채 MMF라 연방세 면제.</p>
+    <p class="note">${y == null
+      ? (mmfAutoErr ? `수익률 자동 조회 실패 (${escapeHtml(mmfAutoErr)}) — 피델리티 MMF 화면의 7-day yield를 입력해주세요.` : "수익률 자동 조회 중…")
+      : (manual ? "직접 입력한 수익률 기준." : `자동 조회한 수익률(${escapeHtml(mmfAutoSrc || "자동")}) ${fmt(mmfAutoYield)}% 기준 — 직접 입력하면 그 값을 우선.`)} 이자는 매일 쌓여 월말에 지급된다고 가정. 지방채 MMF라 연방세 면제.</p>
   `;
   $("#mmfBalance").addEventListener("change", e => { const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { LS.set("mmf", { ...mmfGet(), balance: v }); renderMmf(); renderBondIncome(); } });
   $("#mmfYield").addEventListener("change", e => { const v = parseFloat(e.target.value); LS.set("mmf", { ...mmfGet(), yield: isFinite(v) && v > 0 ? v : null }); renderMmf(); renderBondIncome(); });
@@ -1101,11 +1131,11 @@ function renderTreasury() {
 async function loadMuniBench(force) {
   benchLoadedFor.muni = true;
   fetchMuniEtfYields().then(rows => { muniEtfData = rows; muniEtfErr = ""; renderMuniCurve(); }).catch(e => { muniEtfData = null; muniEtfErr = e.message; renderMuniCurve(); });
-  // MMF 7일 수익률 자동 조회(CNBC의 dividendyield) — 재무부 금리표와 동시에 진행
-  fetchQuotesCnbc([mmfGet().ticker]).then(q => {
-    const d = q[mmfGet().ticker] && q[mmfGet().ticker].div;
-    if (d && d.yield != null && d.yield > 0) { mmfAutoYield = d.yield; renderMmf(); renderBondIncome(); }
-  }).catch(() => {});
+  // MMF 7일 수익률 자동 조회 — 재무부 금리표와 동시에 진행
+  fetchMmfYieldAuto(mmfGet().ticker).then(r => {
+    mmfAutoYield = r.yield; mmfAutoSrc = r.src + (r.stale ? " · 최근 캐시" : ""); mmfAutoErr = "";
+    renderMmf(); renderBondIncome();
+  }).catch(e => { mmfAutoErr = e.message; renderMmf(); });
   try {
     const t = await fetchTreasuryOfficial();
     treasuryData = { src: t.src, date: t.date, rows: TREASURY_TENORS.map(([k, label]) => ({ label, val: t.rates[k] ?? null })) };
