@@ -140,19 +140,35 @@ document.addEventListener("click", async e => {
 });
 
 /* ---------- 잠금 / 자동 잠금 ---------- */
-function autolockMin() { const v = localStorage.getItem(AUTOLOCK_KEY); return v == null ? 5 : Number(v); }
+function autolockMin() { const v = localStorage.getItem(AUTOLOCK_KEY); return v == null ? 30 : Number(v); }
+let sharedDone = false, lastSess = 0;
+async function enter() {
+  $("#lock").hidden = true; await reload(); armLock(); await fillMissingUrls();
+  if (pendingShare && !sharedDone) { sharedDone = true; pendingShare.noteText ? openImporter(pendingShare.noteText) : openEditor(null, pendingShare); }
+}
+async function init() {
+  try {
+    const s = await Vault.loadSession(), m = autolockMin();
+    if (s && (!m || Date.now() - s.lastActive < m * 60000) && await Vault.checkKey(s.key)) { key = s.key; await enter(); return; }
+  } catch {}
+  Vault.clearSession().catch(() => {}); showLock();
+}
 function armLock() {
   clearTimeout(lockTimer);
   const m = autolockMin(); if (!key || !m) return;
   lockTimer = setTimeout(() => lock("자동으로 잠갔어요"), m * 60000);
 }
 function lock(msg) {
+  Vault.clearSession().catch(() => {});
   key = null; entries = []; clearTimeout(lockTimer); selecting = false; selected.clear(); delAsk = prefAsk = false; renderSelBar();
   ["#detail", "#editor", "#settings"].forEach(s => { $(s).hidden = true; $(s).innerHTML = ""; });
   $("#list").innerHTML = ""; $("#emptyBox").innerHTML = ""; $("#count").textContent = "";
   showLock(); if (msg) toast(msg);
 }
-["pointerdown", "keydown", "touchstart", "scroll"].forEach(ev => addEventListener(ev, () => { if (key) armLock(); }, { passive: true }));
+["pointerdown", "keydown", "touchstart", "scroll"].forEach(ev => addEventListener(ev, () => {
+  if (!key) return; armLock();
+  if (Date.now() - lastSess > 15000) { lastSess = Date.now(); Vault.saveSession(key).catch(() => {}); }
+}, { passive: true }));
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) hiddenAt = Date.now();
   else if (key && hiddenAt && autolockMin() && Date.now() - hiddenAt > autolockMin() * 60000) lock("자동으로 잠갔어요");
@@ -193,8 +209,7 @@ async function showLock() {
         key = await Vault.unlock(pw);
         if (!key) { stat(`<div class="status err">마스터 비밀번호가 맞지 않아요.</div>`); $("#mpw").select(); return; }
       }
-      el.hidden = true; el.innerHTML = ""; await reload(); armLock(); await fillMissingUrls();
-      if (pendingShare && !showLock.shared) { showLock.shared = true; pendingShare.noteText ? openImporter(pendingShare.noteText) : openEditor(null, pendingShare); }
+      el.innerHTML = ""; await enter(); Vault.saveSession(key).catch(() => {});
     } finally { go.disabled = false; }
   };
   setTimeout(() => $("#mpw")?.focus(), 50);
@@ -508,8 +523,8 @@ function openSettings() {
       ${isStandalone() ? "" : `<div class="sec"><h3>홈 화면 아이콘</h3><div data-install-box>${installHTML()}</div><div class="hint">설치해야 삼성노트 등의 <b>공유</b> 목록에 "비밀번호 금고"가 나타나요.</div></div>`}
 
       <div class="sec"><h3>자동 잠금</h3>
-        <div class="kv"><span>안 쓰고 있으면 잠그기</span><select id="autolock">${[[1, "1분"], [5, "5분"], [15, "15분"], [30, "30분"], [0, "안 함"]].map(([v, t]) => `<option value="${v}" ${v === al ? "selected" : ""}>${t}</option>`).join("")}</select></div>
-        <div class="hint">화면을 끄거나 다른 앱으로 갔다 와도 이 시간이 지났으면 다시 마스터 비밀번호를 물어요.</div></div>
+        <div class="kv"><span>안 쓰고 있으면 잠그기</span><select id="autolock">${[[1, "1분"], [5, "5분"], [15, "15분"], [30, "30분"], [60, "1시간"], [480, "8시간"], [1440, "하루"], [0, "안 함 (잠금 버튼 누를 때까지)"]].map(([v, t]) => `<option value="${v}" ${v === al ? "selected" : ""}>${t}</option>`).join("")}</select></div>
+        <div class="hint">마지막으로 쓴 뒤 이 시간 안에는 <b>새로고침하거나 앱을 껐다 켜도 다시 묻지 않아요.</b> 시간이 지나거나 위쪽 <b>잠금</b> 버튼을 누르면 마스터 비밀번호를 물어요. 길게 할수록 편하지만, 폰을 잃어버렸을 때 그 시간 동안은 열릴 수 있으니 <b>폰 화면 잠금</b>을 꼭 쓰세요.</div></div>
 
       <div class="sec"><h3>백업 (암호화)</h3>
         <div class="btnrow"><button class="btn" data-backup>백업 파일 저장</button><label class="btn pick" style="display:grid;place-items:center">복원<input type="file" accept=".json,application/json" id="restoreFile"></label></div>
@@ -563,7 +578,7 @@ function openSettings() {
     st(`<div class="status">확인 중…</div>`);
     if (!(await Vault.unlock(o))) return st(`<div class="status err">현재 마스터 비밀번호가 맞지 않아요.</div>`);
     st(`<div class="status">다시 암호화하는 중…</div>`);
-    key = await Vault.changeMaster(n, entries);
+    key = await Vault.changeMaster(n, entries); await Vault.saveSession(key);
     $("#chpw").reset(); updateMeter("", "cmeter"); st(""); toast("마스터 비밀번호를 바꿨어요");
   };
 }
@@ -612,5 +627,5 @@ async function importCSV(file) {
 }
 
 /* ---------- 시작 ---------- */
-showLock();
+init();
 if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) navigator.serviceWorker.register("sw.js").catch(() => {});
