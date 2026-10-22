@@ -13,7 +13,9 @@ const pendingShare = (() => {
   const p = new URLSearchParams(location.search);
   if (!p.has("url") && !p.has("text") && !p.has("title")) return null;
   history.replaceState(null, "", location.pathname);
-  const raw = p.get("url") || (p.get("text") || "").match(/https?:\/\/\S+/)?.[0] || "";
+  const text = p.get("text") || "", raw = p.get("url") || text.match(/https?:\/\/\S+/)?.[0] || "";
+  // 삼성노트 등에서 여러 줄 메모를 공유하면 URL 하나가 아니라 목록 가져오기로
+  if (!p.get("url") && text.trim().split(/\n/).filter(l => l.trim()).length > 1) return { noteText: text };
   return raw ? sharePreset(raw, p.get("title") || "") : null;
 })();
 function sharePreset(raw, title) {
@@ -145,7 +147,7 @@ async function showLock() {
         if (!key) { stat(`<div class="status err">마스터 비밀번호가 맞지 않아요.</div>`); $("#mpw").select(); return; }
       }
       el.hidden = true; el.innerHTML = ""; await reload(); armLock();
-      if (pendingShare && !showLock.shared) { showLock.shared = true; openEditor(null, pendingShare); }
+      if (pendingShare && !showLock.shared) { showLock.shared = true; pendingShare.noteText ? openImporter(pendingShare.noteText) : openEditor(null, pendingShare); }
     } finally { go.disabled = false; }
   };
   setTimeout(() => $("#mpw")?.focus(), 50);
@@ -182,7 +184,7 @@ function render() {
       <div class="quick"><button class="qbtn" data-copypw="${e.id}" aria-label="비밀번호 복사" title="비밀번호 복사">${ICON.copy}</button></div></div>`;
   }).join("");
   $("#emptyBox").innerHTML = entries.length ? (list.length ? "" : `<div class="empty">검색 결과가 없어요</div>`) :
-    `<div class="empty"><h2>아직 저장된 비밀번호가 없어요</h2><p>오른쪽 아래 <b>추가</b>를 눌러 첫 항목을 저장하거나,<br>백업·설정에서 다른 앱의 CSV를 가져오세요.</p></div>`;
+    `<div class="empty"><h2>아직 저장된 비밀번호가 없어요</h2><p>오른쪽 아래 <b>추가</b>를 눌러 하나씩 저장하거나,<br>메모에 적어둔 목록을 한 번에 옮기세요.</p><div class="btnrow" style="margin-top:14px;justify-content:center"><button class="btn primary" data-import-note style="flex:none;padding:0 20px">메모 붙여넣어 가져오기</button></div></div>`;
 }
 $("#q").oninput = render; $("#sort").onchange = render;
 $("#rail").onclick = e => { const b = e.target.closest(".chip"); if (!b) return; if (b.hasAttribute("data-fav")) favOnly = !favOnly; else { favOnly = false; filter = b.dataset.cat; } render(); };
@@ -190,6 +192,7 @@ $("#list").onclick = async e => {
   const c = e.target.closest("[data-copypw]"); if (c) { e.stopPropagation(); const en = entries.find(x => x.id === c.dataset.copypw); if (en) { await copy(en.password, "비밀번호 복사", true); touch(en); } return; }
   const it = e.target.closest("[data-open]"); if (it) openDetail(it.dataset.open);
 };
+$("#emptyBox").onclick = e => { if (e.target.closest("[data-import-note]")) openImporter(); };
 $("#list").onkeydown = e => { if (e.key === "Enter") { const it = e.target.closest("[data-open]"); if (it) openDetail(it.dataset.open); } };
 $("#fab").onclick = () => openEditor(null);
 $("#lockBtn").onclick = () => lock();
@@ -296,6 +299,101 @@ function openEditor(id, preset) {
   setTimeout(() => $(c ? "#f_pw" : "#f_site").focus(), 50);
 }
 
+/* ---------- 메모 붙여넣기 가져오기 (삼성노트 등 수기 목록) ---------- */
+const L_USER = "(?:아이디|아이디명|계정|계정명|이메일|메일|유저|id|ID|Id|email|E-mail|user(?:name)?|login)";
+const L_PW = "(?:비밀번호|비번|암호|패스워드|패스|pw|PW|Pw|pwd|pass(?:word)?|Password|PASS)";
+const L_URL = "(?:사이트|주소|링크|url|URL|site|link)";
+// 라벨 뒤에는 구분 기호나 공백이 하나는 있어야 함 ("pw1234"는 비밀번호 값이지 라벨이 아님)
+const SEP = "(?:\\s*[:：=＝\\-–>→]\\s*|\\s+)";
+const LABEL_ONLY = new RegExp(`^(?:${L_USER}|${L_PW}|${L_URL})${SEP}\\S`);
+function parseNoteText(text) {
+  const lines = text.replace(/\r/g, "").replace(/\t/g, "  ").split("\n").map(l => l.replace(/^[\s\-•*·‣▪◦]+|^\s*\d+[.)]\s+/g, "").trim());
+  // "국민은행 / 아이디 lena / 비번 1234"처럼 라벨만 있는 줄은 바로 윗줄에 붙임
+  const groups = [];
+  for (const l of lines) {
+    if (!l) { groups.push(null); continue; }
+    if (LABEL_ONLY.test(l) && groups.length && groups[groups.length - 1]) groups[groups.length - 1].push(l);
+    else groups.push([l]);
+  }
+  const out = [];
+  for (const g of groups) { if (!g) continue; const e = parseOne(g.join("  ")); if (e) out.push(e); }
+  return out;
+}
+function parseOne(s) {
+  const e = { site: "", url: "", username: "", password: "", note: "" };
+  const notes = [];
+  s = s.replace(/\(([^)]*)\)/g, (m, v) => { if (v.trim()) notes.push(v.trim()); return " "; });
+  const grab = (lab, key) => { s = s.replace(new RegExp(`(^|[\\s,/|])${lab}${SEP}([^\\s,/|]+)`), (m, pre, v) => { if (!e[key]) e[key] = v; return pre; }); };
+  grab(L_PW, "password"); grab(L_USER, "username"); grab(L_URL, "url");
+  s = s.replace(/(?<![\w@.-])(?:https?:\/\/\S+|www\.\S+|(?:[\w-]+\.)+(?:com|net|org|kr|io|me|app|edu|gov|ca|jp|cn|us|uk|de|fr|tv|ai|dev|shop|co)(?:\/\S*)?)(?![\w@])/i, m => { if (!e.url) e.url = m; return " "; });
+  const toks = s.split(/[\s,/|·]+/).map(t => t.replace(/^[:：]+|[:：]+$/g, "")).filter(t => t && !/^[-–>→]+$/.test(t));
+  const credLike = t => /@/.test(t) || /^\d/.test(t) || (/\d/.test(t) && /[^\w가-힣]/.test(t));
+  if (toks.length && !credLike(toks[0])) {
+    e.site = toks.shift();
+    while (toks.length && /[가-힣]/.test(toks[0]) && !credLike(toks[0])) e.site += " " + toks.shift();
+  }
+  if (!e.password && toks.length) e.password = toks.pop();
+  if (!e.username && toks.length) e.username = toks.shift();
+  if (toks.length) notes.unshift(toks.join(" "));
+  e.note = notes.join(" · ");
+  if (!e.site) e.site = host(e.url).split(".")[0];
+  // 비밀번호에 영문·숫자가 하나도 없으면 ("할일: 우유 사기") 계정 정보가 아님
+  if (!e.password || !/[A-Za-z0-9]/.test(e.password)) return null;
+  if (!e.site && !e.username) return null;
+  return e;
+}
+function openImporter(text = "") {
+  $("#settings").hidden = true; $("#settings").innerHTML = "";
+  const el = $("#editor"); el.hidden = false; el.scrollTop = 0;
+  el.innerHTML = `<div class="wrap">
+    <div class="bar"><button class="tbtn l" data-close>취소</button><h2>메모에서 가져오기</h2><button class="tbtn r" data-parse>다음</button></div>
+    <div class="body">
+      <div class="f"><label>삼성노트·메모 내용을 그대로 붙여넣으세요</label><textarea id="noteText" style="min-height:200px;font-family:var(--font-mono);font-size:13.5px" placeholder="예)
+네이버 lena123 abcd!234
+쿠팡: lena@gmail.com / pw1234
+국민은행
+  아이디 lena
+  비번 kb9876">${esc(text)}</textarea></div>
+      <div class="hint">한 줄에 <b>사이트 아이디 비밀번호</b> 순서로 적혀 있거나, "아이디:" "비번:" 같은 말이 붙어 있으면 알아서 나눠요. 다음 화면에서 확인하고 틀린 것만 고치면 돼요.</div>
+      <div id="prev"></div>
+    </div></div>`;
+  el.onclick = async e => {
+    const t = e.target.closest("button"); if (!t) return;
+    if (t.hasAttribute("data-close")) { el.hidden = true; el.innerHTML = ""; return; }
+    if (t.hasAttribute("data-parse")) {
+      const rows = parseNoteText($("#noteText").value);
+      if (!rows.length) return toast("나눌 수 있는 내용을 못 찾았어요");
+      $("#prev").innerHTML = `<div class="sec"><h3>${rows.length}개를 찾았어요 — 확인 후 저장</h3>${rows.map((r, i) => `
+        <div class="rows" data-row="${i}" style="padding:10px;display:flex;flex-direction:column;gap:6px">
+          <div class="pw"><input class="r-site" value="${esc(r.site)}" placeholder="사이트" style="font-family:inherit;font-weight:600"><button type="button" class="x" data-rm aria-label="제외">✕</button></div>
+          <input class="r-url" value="${esc(r.url)}" placeholder="주소 (선택)" style="font-family:inherit;border:1px solid var(--line);border-radius:10px;padding:8px 12px;background:var(--bg)">
+          <div class="two" style="gap:6px"><input class="r-user" value="${esc(r.username)}" placeholder="아이디" style="border:1px solid var(--line);border-radius:10px;padding:8px 12px;background:var(--bg)"><input class="r-pw" value="${esc(r.password)}" placeholder="비밀번호" style="font-family:var(--font-mono);border:1px solid var(--line);border-radius:10px;padding:8px 12px;background:var(--bg)"></div>
+          ${r.note ? `<input class="r-note" value="${esc(r.note)}" placeholder="메모" style="border:1px solid var(--line);border-radius:10px;padding:8px 12px;background:var(--bg);font-size:13px">` : `<input class="r-note" type="hidden" value="">`}
+        </div>`).join("")}
+        <button class="btn primary" data-save style="margin-top:4px">${rows.length}개 저장</button></div>`;
+      $("#prev").scrollIntoView({ behavior: "smooth" });
+      return;
+    }
+    if (t.hasAttribute("data-rm")) { t.closest("[data-row]").remove(); const n = $$("#prev [data-row]").length; if (!n) $("#prev").innerHTML = ""; else $("[data-save]").textContent = `${n}개 저장`; return; }
+    if (t.hasAttribute("data-save")) {
+      let n = 0, skip = 0;
+      const byKey = new Map(entries.map(x => [(x.site + "|" + x.username).toLowerCase(), x]));
+      for (const row of $$("#prev [data-row]")) {
+        const v = c => row.querySelector(c).value.trim();
+        const site = v(".r-site"), username = v(".r-user"), password = v(".r-pw");
+        if (!site || !password) { skip++; continue; }
+        const ex = byKey.get((site + "|" + username).toLowerCase());
+        const body = { ...(ex || { id: uid(), category: "기타", favorite: false, createdAt: Date.now(), lastUsed: 0 }), site, url: v(".r-url"), username, password, note: v(".r-note") || (ex?.note || ""), updatedAt: Date.now() };
+        await Vault.save(key, body); n++;
+      }
+      el.hidden = true; el.innerHTML = ""; await reload();
+      toast(`${n}개 저장했어요${skip ? ` · 사이트나 비밀번호가 빈 ${skip}개는 건너뜀` : ""}`, 3500);
+    }
+  };
+  if (text) el.querySelector("[data-parse]").click(); else setTimeout(() => $("#noteText").focus(), 50);
+}
+const $$ = s => [...document.querySelectorAll(s)];
+
 /* ---------- 설정 ---------- */
 function openSettings() {
   const el = $("#settings"); el.hidden = false; el.scrollTop = 0;
@@ -316,6 +414,10 @@ function openSettings() {
       <div class="sec"><h3>백업 (암호화)</h3>
         <div class="btnrow"><button class="btn" data-backup>백업 파일 저장</button><label class="btn pick" style="display:grid;place-items:center">복원<input type="file" accept=".json,application/json" id="restoreFile"></label></div>
         <div class="hint">백업 파일은 <b>마스터 비밀번호로 암호화된 상태</b>라 구글 드라이브 등에 올려도 내용이 보이지 않아요. 복원할 때 그 백업의 마스터 비밀번호가 필요해요. 폰을 바꾸거나 브라우저 데이터를 지우면 금고가 사라지니 <b>정기적으로 백업</b>하세요.</div></div>
+
+      <div class="sec"><h3>삼성노트·메모에 적어둔 목록 옮기기</h3>
+        <div class="btnrow"><button class="btn primary" data-import-note>메모 붙여넣어 가져오기</button></div>
+        <div class="hint">삼성노트에서 내용을 전체 선택 → 복사한 뒤 여기에 붙여넣으면 사이트·아이디·비밀번호를 알아서 나눠요. 삼성노트의 <b>공유 → 비밀번호 금고</b>로 보내도 같은 화면이 열려요.</div></div>
 
       <div class="sec"><h3>다른 앱과 주고받기 (CSV)</h3>
         <div class="btnrow"><label class="btn pick" style="display:grid;place-items:center">CSV 가져오기<input type="file" accept=".csv,text/csv" id="csvFile"></label><button class="btn" data-csv>CSV 내보내기</button></div>
@@ -344,6 +446,7 @@ function openSettings() {
     const t = e.target.closest("button"); if (!t) return;
     if (t.hasAttribute("data-close")) { el.hidden = true; el.innerHTML = ""; }
     else if (t.hasAttribute("data-eye")) toggleEye(t);
+    else if (t.hasAttribute("data-import-note")) openImporter();
     else if (t.hasAttribute("data-backup")) { const b = await Vault.exportBackup(); saveFile(`비밀번호금고-백업-${fmtDate(Date.now()).replace(/\./g, "")}.json`, new Blob([JSON.stringify(b)], { type: "application/json" })); }
     else if (t.hasAttribute("data-csv")) $("#wipeBox").innerHTML = `<div class="confirm"><b>평문 CSV로 내보낼까요?</b><span class="small">누구나 열어볼 수 있는 파일이에요. 다른 앱으로 옮긴 뒤 바로 삭제하세요.</span><div class="btnrow"><button class="btn" data-cancel>취소</button><button class="btn danger" data-csvyes>내보내기</button></div></div>`;
     else if (t.hasAttribute("data-csvyes")) { $("#wipeBox").innerHTML = ""; exportCSV(); }
