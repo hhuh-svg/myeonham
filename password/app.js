@@ -306,17 +306,24 @@ const L_URL = "(?:사이트|주소|링크|url|URL|site|link)";
 // 라벨 뒤에는 구분 기호나 공백이 하나는 있어야 함 ("pw1234"는 비밀번호 값이지 라벨이 아님)
 const SEP = "(?:\\s*[:：=＝\\-–>→]\\s*|\\s+)";
 const LABEL_ONLY = new RegExp(`^(?:${L_USER}|${L_PW}|${L_URL})${SEP}\\S`);
+const credLike = t => /@/.test(t) || /^\d/.test(t) || (/\d/.test(t) && /[^\w가-힣]/.test(t));
 function parseNoteText(text) {
-  const lines = text.replace(/\r/g, "").replace(/\t/g, "  ").split("\n").map(l => l.replace(/^[\s\-•*·‣▪◦]+|^\s*\d+[.)]\s+/g, "").trim());
-  // "국민은행 / 아이디 lena / 비번 1234"처럼 라벨만 있는 줄은 바로 윗줄에 붙임
+  const lines = text.replace(/\r/g, "").replace(/\t/g, "  ").split("\n")
+    .map(l => l.replace(/^[\s\-•*·‣▪◦]+/, "").replace(/^\d+[.)]\s*(?=\S)/, "").trim()).filter(Boolean);
+  // 세로로 적은 형태(사이트 줄 → 아이디 줄 → 비밀번호 줄, 빈 줄 섞여도 됨)와
+  // 라벨만 있는 줄("비번 1234")은 윗줄의 항목에 붙이고, 그 외는 줄마다 한 항목
   const groups = [];
+  let cur = null;
+  const isTitle = l => !/\s/.test(l) ? !credLike(l) && !/^[A-Za-z0-9._%+-]+@/.test(l) && /[가-힣]/.test(l) : l.split(/\s+/).every(t => !credLike(t)) && !LABEL_ONLY.test(l) && /[가-힣]/.test(l);
+  const isValue = l => !/\s/.test(l) && !/[가-힣]/.test(l);
   for (const l of lines) {
-    if (!l) { groups.push(null); continue; }
-    if (LABEL_ONLY.test(l) && groups.length && groups[groups.length - 1]) groups[groups.length - 1].push(l);
-    else groups.push([l]);
+    if (LABEL_ONLY.test(l) && cur) { cur.push(l); continue; }
+    if (isValue(l) && cur && cur.open && cur.vals < 2) { cur.push(l); cur.vals++; continue; }
+    if (isTitle(l)) { cur = [l]; cur.open = true; cur.vals = 0; groups.push(cur); continue; }
+    cur = [l]; cur.open = false; cur.vals = 0; groups.push(cur);
   }
   const out = [];
-  for (const g of groups) { if (!g) continue; const e = parseOne(g.join("  ")); if (e) out.push(e); }
+  for (const g of groups) { const e = parseOne(g.join("  ")); if (e) out.push(e); }
   return out;
 }
 function parseOne(s) {
@@ -327,7 +334,6 @@ function parseOne(s) {
   grab(L_PW, "password"); grab(L_USER, "username"); grab(L_URL, "url");
   s = s.replace(/(?<![\w@.-])(?:https?:\/\/\S+|www\.\S+|(?:[\w-]+\.)+(?:com|net|org|kr|io|me|app|edu|gov|ca|jp|cn|us|uk|de|fr|tv|ai|dev|shop|co)(?:\/\S*)?)(?![\w@])/i, m => { if (!e.url) e.url = m; return " "; });
   const toks = s.split(/[\s,/|·]+/).map(t => t.replace(/^[:：]+|[:：]+$/g, "")).filter(t => t && !/^[-–>→]+$/.test(t));
-  const credLike = t => /@/.test(t) || /^\d/.test(t) || (/\d/.test(t) && /[^\w가-힣]/.test(t));
   if (toks.length && !credLike(toks[0])) {
     e.site = toks.shift();
     while (toks.length && /[가-힣]/.test(toks[0]) && !credLike(toks[0])) e.site += " " + toks.shift();
