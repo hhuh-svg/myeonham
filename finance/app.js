@@ -423,7 +423,12 @@ function addEtfSymbol() {
   syms.push(sym);
   LS.set("etfSymbols", syms);
   inp.value = "";
-  loadEtf(true);
+  inp.blur();
+  toast(sym + " 추가됨 — 시세 조회 중");
+  loadEtf(true).then(() => {
+    const row = $(`#etfList .etfRow[data-sym="${sym}"]`);
+    if (row) row.scrollIntoView({ block: "center", behavior: "smooth" });
+  });
 }
 function removeEtfSymbol(sym) {
   const syms = LS.get("etfSymbols", DEFAULT_ETFS).filter(s => s !== sym);
