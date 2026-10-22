@@ -772,7 +772,14 @@ function createBondHoldings(storageKey, defaultData) {
       if (h && isFinite(n)) { h.price = n; LS.set(storageKey, list); }
     },
     delete(cusip) { LS.set(storageKey, load().filter(x => x.cusip !== cusip)); },
-    add(h) { const list = load(); list.push(h); LS.set(storageKey, list); }
+    add(h) { const list = load(); list.push(h); LS.set(storageKey, list); },
+    upsert(h) { // CUSIP 기준으로 있으면 갱신, 없으면 추가 (CSV 가져오기용)
+      const list = load();
+      const i = list.findIndex(x => x.cusip === h.cusip);
+      if (i >= 0) list[i] = { ...list[i], ...h }; else list.push(h);
+      LS.set(storageKey, list);
+      return i >= 0 ? "updated" : "added";
+    }
   };
 }
 const muniBonds = createBondHoldings("muniHoldings", DEFAULT_MUNI_HOLDINGS);
@@ -1359,6 +1366,18 @@ function homeSkeleton() {
     <div class="card" id="homeIncome"><h2><span class="lbl">연간 예상 수입</span></h2><div class="status">불러오는 중…</div></div>
     <div class="card" id="homeTop"><h2><span class="lbl">상위 비중 종목</span></h2><div class="status">불러오는 중…</div></div>
     <div class="card" id="homeMovers"><h2><span class="lbl">오늘 등락</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="card" id="importCard">
+      <h2><span class="lbl">피델리티 CSV 가져오기</span></h2>
+      <div class="small">피델리티 웹사이트 → Accounts &amp; Trade → Portfolio → <b>Positions</b> → 오른쪽 위 <b>Download</b>로 받은 CSV를 넣으면 ETF·주식 수량/매수단가, 지방채·국채, MMF 잔액을 한 번에 읽어 미리보기 후 반영합니다. 계좌가 여러 개면 같은 종목은 합산(가중평균단가).</div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn sm primary" id="importBtn">CSV 파일 선택</button>
+        <button class="btn sm" id="importPasteBtn">텍스트 붙여넣기</button>
+        <input type="file" id="importFile" accept=".csv,text/csv,text/plain" hidden>
+      </div>
+      <textarea id="importPaste" class="qtyInput" style="width:100%;min-height:90px;margin-top:8px;font-family:var(--font-mono);font-size:11px" placeholder="CSV 내용을 통째로 붙여넣고 아래 버튼을 누르세요" hidden></textarea>
+      <div class="row" id="importPasteRow" style="margin-top:8px" hidden><button class="btn sm primary" id="importPasteGo">붙여넣은 내용 읽기</button></div>
+      <div id="importPreview" style="margin-top:10px"></div>
+    </div>
     <div class="card">
       <h2><span class="lbl">데이터 백업 · 복원</span></h2>
       <div class="small">보유수량·채권·MMF·설정은 이 기기 브라우저에만 저장됩니다. 폰을 바꾸거나 브라우저 데이터를 지우면 사라지니 가끔 백업 파일을 받아두세요.</div>
@@ -1375,6 +1394,17 @@ function homeSkeleton() {
   $("#backupBtn").addEventListener("click", backupData);
   $("#restoreBtn").addEventListener("click", () => $("#restoreFile").click());
   $("#restoreFile").addEventListener("change", restoreData);
+  $("#importBtn").addEventListener("click", () => $("#importFile").click());
+  $("#importFile").addEventListener("change", e => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => previewFidelityCsv(String(reader.result));
+    reader.readAsText(f);
+    e.target.value = "";
+  });
+  $("#importPasteBtn").addEventListener("click", () => { const t = $("#importPaste"); t.hidden = !t.hidden; $("#importPasteRow").hidden = t.hidden; if (!t.hidden) t.focus(); });
+  $("#importPasteGo").addEventListener("click", () => previewFidelityCsv($("#importPaste").value));
 }
 function backupData() {
   const out = {};
@@ -1514,6 +1544,137 @@ async function loadHome(force) {
   if (!fxRate && !fxLoaded) { try { await loadFx(); } catch {} } // 원화 환산용
   renderHome(lastEtfData, false);
   setUpdated(nowLabel() + " 업데이트");
+}
+
+// =========================================================
+// 0-b) 피델리티 Positions CSV 가져오기 — 보유수량·매수단가·채권·MMF를 캡처 대신 파일로 갱신
+// =========================================================
+function parseCsv(text) {
+  const rows = [];
+  let row = [], field = "", inQ = false;
+  const s = String(text).replace(/^﻿/, "");
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inQ) {
+      if (c === '"') { if (s[i + 1] === '"') { field += '"'; i++; } else inQ = false; }
+      else field += c;
+    } else if (c === '"') inQ = true;
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && s[i + 1] === "\n") i++;
+      row.push(field); rows.push(row); row = []; field = "";
+    } else field += c;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+function csvNum(v) {
+  if (v == null) return null;
+  const t = String(v).trim();
+  if (!t || /^(n\/a|--|-|—)$/i.test(t)) return null;
+  const neg = /^\(.*\)$/.test(t) || t.startsWith("-");
+  const n = parseFloat(t.replace(/[$,%()\s+-]/g, ""));
+  return isFinite(n) ? (neg ? -n : n) : null;
+}
+// 피델리티 CSV 한 장을 { etf:{sym:{qty,costTotal,costAvg}}, muni:[], gov:[], mmf:[], skipped:[] } 로 분류
+function parseFidelityPositions(text) {
+  const rows = parseCsv(text);
+  const hi = rows.findIndex(r => r.some(c => /^symbol$/i.test(c.trim())) && r.some(c => /quantity/i.test(c)));
+  if (hi < 0) throw new Error("피델리티 Positions CSV 형식이 아니에요 (Symbol/Quantity 헤더 없음)");
+  const header = rows[hi].map(h => h.trim().toLowerCase());
+  const col = (...names) => { for (const n of names) { const i = header.findIndex(h => h === n); if (i >= 0) return i; } for (const n of names) { const i = header.findIndex(h => h.includes(n)); if (i >= 0) return i; } return -1; };
+  const cSym = col("symbol"), cDesc = col("description"), cQty = col("quantity"), cLast = col("last price"), cVal = col("current value"),
+    cCostTotal = col("cost basis total", "cost basis"), cCostAvg = col("average cost basis", "average cost"), cAcct = col("account name", "account number");
+  const out = { etf: {}, muni: [], gov: [], mmf: [], skipped: [], accounts: new Set() };
+  for (let r = hi + 1; r < rows.length; r++) {
+    const row = rows[r];
+    if (!row || row.length < 3) continue;
+    let sym = (row[cSym] || "").trim().toUpperCase().replace(/\*+$/, "");
+    const desc = (row[cDesc] || "").trim();
+    const qty = csvNum(row[cQty]);
+    if (!sym || /^pending activity$/i.test(sym) || /^(cash|total)$/i.test(sym)) { if (sym) out.skipped.push(sym); continue; }
+    if (qty == null) { out.skipped.push(sym); continue; }
+    if (cAcct >= 0 && row[cAcct]) out.accounts.add(row[cAcct].trim());
+    const last = csvNum(row[cLast]);
+    const value = csvNum(row[cVal]);
+    const couponM = desc.match(/(\d{1,2}\.\d{2,5})\s*%/);
+    const matM = desc.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+    const isCusip = /^[0-9A-Z]{9}$/.test(sym) && /\d/.test(sym);
+    if (isCusip && couponM && matM) {
+      const h = { cusip: sym, name: desc.replace(/\s+\d{1,2}\.\d{2,5}\s*%.*$/, "").slice(0, 40).trim() || sym, coupon: parseFloat(couponM[1]), maturity: `${matM[3]}-${matM[1]}-${matM[2]}`, face: qty, price: last != null ? last : (value != null && qty ? value / qty * 100 : 100) };
+      (/UNITED STATES TREAS|US TREAS|U S TREAS|TREASURY/i.test(desc) ? out.gov : out.muni).push(h);
+      continue;
+    }
+    if (/XX$/.test(sym) || /MONEY MARKET|MONEY MKT/i.test(desc)) { // 머니마켓펀드: 수량 = 잔액
+      out.mmf.push({ ticker: sym, name: desc.slice(0, 50), balance: value != null ? value : qty });
+      continue;
+    }
+    if (!/^[A-Z][A-Z0-9.\-]{0,9}$/.test(sym)) { out.skipped.push(sym); continue; }
+    const costTotal = csvNum(row[cCostTotal]);
+    const costAvg = csvNum(row[cCostAvg]);
+    const e = out.etf[sym] || (out.etf[sym] = { qty: 0, costTotal: 0, hasCost: false, name: desc });
+    e.qty += qty;
+    const ct = costTotal != null ? costTotal : (costAvg != null ? costAvg * qty : null);
+    if (ct != null) { e.costTotal += ct; e.hasCost = true; }
+  }
+  out.accounts = [...out.accounts];
+  if (!Object.keys(out.etf).length && !out.muni.length && !out.gov.length && !out.mmf.length) throw new Error("읽을 수 있는 보유 종목이 없어요");
+  return out;
+}
+let importPending = null;
+function previewFidelityCsv(text) {
+  const box = $("#importPreview");
+  let p;
+  try { p = parseFidelityPositions(text); } catch (e) { box.innerHTML = `<div class="status err">${escapeHtml(e.message)}</div>`; importPending = null; return; }
+  importPending = p;
+  const syms = LS.get("etfSymbols", DEFAULT_ETFS);
+  const etfRows = Object.entries(p.etf).sort((a, b) => a[0].localeCompare(b[0])).map(([sym, e]) => {
+    const oldQ = parseFloat(getEtfQty(sym)) || 0, oldC = parseFloat(getEtfCost(sym));
+    const newC = e.hasCost && e.qty ? e.costTotal / e.qty : (isFinite(oldC) ? oldC : null);
+    const isNew = !syms.includes(sym);
+    const changed = isNew || Math.abs(oldQ - e.qty) > 1e-6 || (newC != null && (!isFinite(oldC) || Math.abs(oldC - newC) > 0.005));
+    return { sym, e, oldQ, newC, isNew, changed };
+  });
+  const changedCount = etfRows.filter(r => r.changed).length;
+  const bondLine = (h, kind) => `<div class="small">${kind} ${escapeHtml(h.cusip)} ${escapeHtml(h.name)} · 쿠폰 ${fmt(h.coupon, 3)}% · 만기 ${h.maturity} · 액면 $${fmtInt(h.face)} · 가격 ${fmt(h.price, 3)}</div>`;
+  box.innerHTML = `
+    <div class="small" style="margin-bottom:6px">${p.accounts.length ? `계좌 ${p.accounts.length}개: ${escapeHtml(p.accounts.join(", "))} · ` : ""}ETF·주식 ${etfRows.length}종목(변경 ${changedCount}) · 지방채 ${p.muni.length} · 국채 ${p.gov.length} · MMF ${p.mmf.length}${p.skipped.length ? ` · 건너뜀: ${escapeHtml(p.skipped.join(", "))}` : ""}</div>
+    ${etfRows.length ? `<div style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px 8px">
+      ${etfRows.map(r => `<div class="small" style="${r.changed ? "" : "opacity:.55"}"><b>${escapeHtml(r.sym)}</b>${r.isNew ? " <span style='color:var(--accent)'>신규</span>" : ""} 수량 ${r.oldQ ? fmt(r.oldQ, 3) + " → " : ""}<b>${fmt(r.e.qty, 3)}</b>${r.newC != null ? ` · 단가 $${fmt(r.newC)}` : ""}</div>`).join("")}
+    </div>` : ""}
+    ${p.muni.map(h => bondLine(h, "지방채")).join("")}
+    ${p.gov.map(h => bondLine(h, "국채")).join("")}
+    ${p.mmf.map(m => `<div class="small">MMF ${escapeHtml(m.ticker)} 잔액 $${fmtInt(m.balance)}${p.mmf.length > 1 ? " (가장 큰 잔액만 MMF 카드에 반영)" : ""}</div>`).join("")}
+    <div class="row" style="margin-top:10px">
+      <button class="btn sm primary" id="importApply">반영하기</button>
+      <button class="btn sm" id="importCancel">취소</button>
+    </div>
+    <p class="note">CSV에 없는 기존 종목은 그대로 둡니다(판 종목은 ETF 탭에서 삭제). 채권은 CUSIP 기준으로 갱신/추가, 채권 가격은 CSV의 Last Price를 씁니다.</p>
+  `;
+  $("#importApply").addEventListener("click", applyFidelityImport);
+  $("#importCancel").addEventListener("click", () => { box.innerHTML = ""; importPending = null; });
+}
+function applyFidelityImport() {
+  const p = importPending;
+  if (!p) return;
+  const syms = LS.get("etfSymbols", DEFAULT_ETFS);
+  let added = 0;
+  Object.entries(p.etf).forEach(([sym, e]) => {
+    if (!syms.includes(sym)) { syms.push(sym); added++; }
+    setEtfQty(sym, e.qty);
+    if (e.hasCost && e.qty) setEtfCost(sym, Math.round(e.costTotal / e.qty * 100) / 100);
+  });
+  LS.set("etfSymbols", syms);
+  p.muni.forEach(h => muniBonds.upsert(h));
+  p.gov.forEach(h => govBonds.upsert(h));
+  if (p.mmf.length) {
+    const big = p.mmf.slice().sort((a, b) => b.balance - a.balance)[0];
+    LS.set("mmf", { ...mmfGet(), ticker: big.ticker, name: big.name || big.ticker, balance: big.balance });
+  }
+  LS.set("lastImportAt", Date.now());
+  importPending = null;
+  toast(`반영했어요 — ETF·주식 ${Object.keys(p.etf).length}종목(신규 ${added}), 채권 ${p.muni.length + p.gov.length}, MMF ${p.mmf.length}. 다시 불러옵니다`);
+  setTimeout(() => location.reload(), 900);
 }
 
 // =========================================================
