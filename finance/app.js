@@ -460,9 +460,16 @@ const ACCOUNTS = [
 const OWNER_LABEL = { personal: "개인", llc: "LLC" };
 // 현금 계좌(체이스 체킹 등): 자산 탭 카드에서 잔고·소유를 직접 입력. key는 "cash:<id>"
 // 체이스 체킹(…1908) 잔고는 사용자 캡처(2026-10-22, Available balance) 기준으로 시딩 — 이후엔 자산 탭에서 직접 갱신
-const DEFAULT_CASH = [{ id: "chase_chk", label: "체이스 체킹 (…1908)", balance: 1245141.74, owner: "personal", apy: 0 }];
-const CASH_VERSION = 1;
-if (LS.get("cashVersion", 0) !== CASH_VERSION) { LS.set("cash", DEFAULT_CASH); LS.set("cashVersion", CASH_VERSION); }
+const DEFAULT_CASH = [
+  { id: "chase_chk", label: "체이스 체킹 (…1908)", balance: 1245141.74, owner: "personal", apy: 0 },
+  { id: "rh_cash", label: "로빈후드 현금", balance: 5000, owner: "personal", apy: 0 } // 사용자: "로빈후드 현금 5000 상태"(2026-10-22)
+];
+const CASH_VERSION = 2;
+if (LS.get("cashVersion", 0) !== CASH_VERSION) { // 버전이 오르면 없는 계좌만 추가(사용자가 고친 잔고는 유지)
+  const cur = LS.get("cash", null) || [];
+  DEFAULT_CASH.forEach(d => { if (!cur.some(c => c.id === d.id)) cur.push({ ...d }); });
+  LS.set("cash", cur); LS.set("cashVersion", CASH_VERSION);
+}
 function cashList() { return LS.get("cash", DEFAULT_CASH); }
 function acctOwner(key) {
   if (key && key.startsWith("cash:")) { const c = cashList().find(x => "cash:" + x.id === key); return c ? c.owner : null; }
