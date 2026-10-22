@@ -93,6 +93,27 @@ function reuseMap() { const m = new Map(); for (const e of entries) if (e.passwo
 function meterHTML(pw, id = "meter") { const s = strength(pw); return `<div class="meter${pw ? " s" + s.score : ""}" id="${id}"><i></i></div><div class="mlabel" id="${id}L"><span>${pw ? esc(s.label) : "&nbsp;"}</span><span>${pw ? pw.length + "자" : ""}</span></div>`; }
 function updateMeter(pw, id = "meter") { const s = strength(pw); const m = $("#" + id); if (!m) return; m.className = pw ? "meter s" + s.score : "meter"; $("#" + id + "L").innerHTML = `<span>${pw ? esc(s.label) : "&nbsp;"}</span><span>${pw ? pw.length + "자" : ""}</span>`; }
 
+/* ---------- 홈 화면 설치 ---------- */
+let installEvt = null;
+const isStandalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvt = e; renderInstall(); });
+addEventListener("appinstalled", () => { installEvt = null; renderInstall(); toast("홈 화면에 설치했어요. 이제 아이콘으로 여세요"); });
+function installHTML() {
+  if (isStandalone()) return "";
+  if (installEvt) return `<button type="button" class="btn primary" data-install style="width:100%">홈 화면에 설치</button>`;
+  const ua = navigator.userAgent, sam = /SamsungBrowser/i.test(ua), chrome = /Chrome\//.test(ua) && !sam;
+  return `<div class="hint" style="background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:10px 12px"><b>홈 화면에 아이콘 만들기</b><br>
+    ${sam ? "아래 <b>≡</b> → <b>현재 페이지 추가</b> → <b>홈 화면</b>" :
+      chrome ? "오른쪽 위 <b>⋮</b> → <b>홈 화면에 추가</b> 또는 <b>앱 설치</b>.<br>그 메뉴가 없으면 지금 창이 다른 앱 안의 미니 브라우저예요 → <b>⋮ → Chrome에서 열기</b>를 먼저 누르세요." :
+      "브라우저 메뉴에서 <b>홈 화면에 추가</b>를 누르세요."}</div>`;
+}
+function renderInstall() { $$("[data-install-box]").forEach(b => b.innerHTML = installHTML()); }
+document.addEventListener("click", async e => {
+  if (!e.target.closest("[data-install]") || !installEvt) return;
+  const ev = installEvt; installEvt = null; renderInstall();
+  try { await ev.prompt(); const r = await ev.userChoice; if (r.outcome !== "accepted") { installEvt = ev; renderInstall(); } } catch { installEvt = ev; renderInstall(); }
+});
+
 /* ---------- 잠금 / 자동 잠금 ---------- */
 function autolockMin() { const v = localStorage.getItem(AUTOLOCK_KEY); return v == null ? 5 : Number(v); }
 function armLock() {
@@ -126,6 +147,7 @@ async function showLock() {
       <div id="lockStat"></div>
       <button class="btn primary" type="submit" id="lockGo">${has ? "열기" : "금고 만들기"}</button>
     </form>
+    <div data-install-box>${installHTML()}</div>
     <p class="small">데이터는 이 폰의 브라우저 안에만 암호화되어 저장돼요. 서버로 보내지 않아요.</p>
   </div>`;
   const stat = h => $("#lockStat").innerHTML = h;
@@ -412,6 +434,8 @@ function openSettings() {
         <div class="row"><div><div class="k">저장된 항목</div><div class="v">${entries.length}개</div></div><div></div></div>
         <div class="row"><div><div class="k">점검</div><div class="v">${weak ? `약한 비밀번호 ${weak}개` : "약한 비밀번호 없음"} · ${reusedN ? `재사용 ${reusedN}개` : "재사용 없음"}</div></div><div></div></div>
       </div>
+
+      ${isStandalone() ? "" : `<div class="sec"><h3>홈 화면 아이콘</h3><div data-install-box>${installHTML()}</div><div class="hint">설치해야 삼성노트 등의 <b>공유</b> 목록에 "비밀번호 금고"가 나타나요.</div></div>`}
 
       <div class="sec"><h3>자동 잠금</h3>
         <div class="kv"><span>안 쓰고 있으면 잠그기</span><select id="autolock">${[[1, "1분"], [5, "5분"], [15, "15분"], [30, "30분"], [0, "안 함"]].map(([v, t]) => `<option value="${v}" ${v === al ? "selected" : ""}>${t}</option>`).join("")}</select></div>
