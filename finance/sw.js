@@ -1,8 +1,8 @@
 // 오프라인에서도 앱 틀이 열리도록 앱 파일만 캐시합니다. 시세·환율 데이터는 항상 실시간 조회(캐시 안 함).
 // 앱 파일은 네트워크 우선(최신 배포가 항상 바로 보이게) — 오프라인일 때만 캐시로 대체.
-const VER = "findash-v2";
+const VER = "findash-v3";
 const FILES = ["./", "index.html", "app.js", "manifest.webmanifest",
-  "icon-192.png", "icon-512.png", "apple-touch-icon.png"];
+  "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(VER).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== VER).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
 self.addEventListener("fetch", e => {
