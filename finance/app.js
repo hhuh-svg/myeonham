@@ -366,6 +366,43 @@ if (LS.get("etfPositionsVersion", 0) !== ETF_POSITIONS_VERSION) {
   LS.set("etfCost", DEFAULT_ETF_COST);
   LS.set("etfPositionsVersion", ETF_POSITIONS_VERSION);
 }
+// 계좌별 분리(2026-10-22): 사용자 확인 — 첫 캡처(JOINT WROS, 지방채 6종 포함)가 피델리티 개인, 두 번째 캡처가 LLC.
+// 합치기 전 계좌별 수량·매입금액을 복원(개인 = 첫 시딩값, LLC = 합산값 − 개인). 국채 3종은 LLC.
+const DEFAULT_ETF_BY_ACCT = {
+  BST: { fid_p: { qty: 178.107, costTotal: 8759.3 }, fid_llc: { qty: 167.0, costTotal: 8012.9 } },
+  GLDM: { fid_p: { qty: 800, costTotal: 68864.0 } },
+  GOOGL: { fid_p: { qty: 24.65, costTotal: 8610.98 }, fid_llc: { qty: 141.0, costTotal: 45990.57 } },
+  IAU: { fid_p: { qty: 79.171, costTotal: 6419.18 }, fid_llc: { qty: 581.0, costTotal: 48150.55 } },
+  LLY: { fid_p: { qty: 4.199, costTotal: 4894.14 }, fid_llc: { qty: 31.0, costTotal: 34394.98 } },
+  MGK: { fid_p: { qty: 418.066, costTotal: 38528.96 } },
+  MSFT: { fid_p: { qty: 18.118, costTotal: 9361.93 }, fid_llc: { qty: 222.0, costTotal: 105515.32 } },
+  NVDA: { fid_p: { qty: 95.166, costTotal: 21832.98 }, fid_llc: { qty: 365.0, costTotal: 68690.87 } },
+  QQQ: { fid_p: { qty: 25.61, costTotal: 18545.99 }, fid_llc: { qty: 25.0, costTotal: 17921.55 } },
+  QQQM: { fid_p: { qty: 308.296, costTotal: 93965.54 } },
+  SCHP: { fid_p: { qty: 2000, costTotal: 51420.0 } },
+  SGOV: { fid_p: { qty: 3000, costTotal: 301830.0 } },
+  SMH: { fid_p: { qty: 130.546, costTotal: 78274.08 }, fid_llc: { qty: 20.0, costTotal: 11628.98 } },
+  SUB: { fid_p: { qty: 308, costTotal: 32210.64 } },
+  TSLA: { fid_p: { qty: 98.174, costTotal: 36024.95 }, fid_llc: { qty: 226.0, costTotal: 91239.28 } },
+  VOO: { fid_p: { qty: 109.637, costTotal: 77728.25 }, fid_llc: { qty: 20.0, costTotal: 13927.7 } },
+  VTES: { fid_p: { qty: 700, costTotal: 69013.0 } },
+  VXUS: { fid_p: { qty: 310, costTotal: 27010.3 } },
+  ARKG: { fid_llc: { qty: 610, costTotal: 20056.8 } },
+  BOTZ: { fid_llc: { qty: 223, costTotal: 8384.8 } },
+  CQQQ: { fid_llc: { qty: 346, costTotal: 18005.84 } },
+  IXN: { fid_llc: { qty: 93, costTotal: 12972.57 } },
+  MCHI: { fid_llc: { qty: 937, costTotal: 58515.65 } },
+  SIVR: { fid_llc: { qty: 375, costTotal: 27461.25 } },
+  SPCX: { fid_llc: { qty: 132, costTotal: 23345.52 } },
+  XOVR: { fid_llc: { qty: 646, costTotal: 13010.44 } }
+};
+const ETF_BYACCT_VERSION = 1;
+if (LS.get("etfByAcctVersion", 0) !== ETF_BYACCT_VERSION) { // 이미 계좌가 지정된 종목은 건드리지 않음
+  const all = LS.get("etfByAcct", {}) || {};
+  Object.entries(DEFAULT_ETF_BY_ACCT).forEach(([sym, m]) => { if (!all[sym]) all[sym] = m; });
+  LS.set("etfByAcct", all);
+  LS.set("etfByAcctVersion", ETF_BYACCT_VERSION);
+}
 const INDEX_TICKERS = [{ sym: "^GSPC", label: "S&P 500" }, { sym: "^IXIC", label: "나스닥" }];
 let etfLoadedOnce = false;
 const paneEtf = $("#pane-etf");
@@ -879,6 +916,12 @@ if (LS.get("govBondVersion", 0) !== GOV_BOND_VERSION) {
   LS.set("govBondVersion", GOV_BOND_VERSION);
 }
 const govBonds = createBondHoldings("govBondHoldings", DEFAULT_GOV_BOND_HOLDINGS);
+// 계좌 지정(2026-10-22, 사용자 확인): 지방채 6종은 피델리티 개인 계좌, 국채 3종은 LLC 계좌. 이미 지정된 건 유지.
+const BOND_ACCT_VERSION = 1;
+if (LS.get("bondAcctVersion", 0) !== BOND_ACCT_VERSION) {
+  [[muniBonds, "fid_p"], [govBonds, "fid_llc"]].forEach(([ctrl, key]) => ctrl.load().forEach(h => { if (!h.acct) ctrl.set(h.cusip, { acct: key }); }));
+  LS.set("bondAcctVersion", BOND_ACCT_VERSION);
+}
 function isoDate(d) { return d.toISOString().slice(0, 10); }
 function daysUntil(d) { const t0 = new Date(); const t = new Date(Date.UTC(t0.getUTCFullYear(), t0.getUTCMonth(), t0.getUTCDate())); return Math.round((d.getTime() - t.getTime()) / 86400000); }
 // 공시된 다음 쿠폰일이 없을 때, 만기 월/일 기준 6개월 간격 지급을 가정해 다음 지급일을 추정
