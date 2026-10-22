@@ -7,6 +7,31 @@ const AUTOLOCK_KEY = "pwvault.autolock";
 const CLIP_CLEAR_MS = 30000;
 
 let key = null, entries = [], filter = "전체", favOnly = false, lockTimer = null, hiddenAt = 0, lastCopy = null;
+let selecting = false, selected = new Set(), visibleIds = [], delAsk = false;
+
+// 이름만 보고 주소를 채워주는 자주 쓰는 사이트 목록 (키: 소문자·공백 제거)
+const SITE_URLS = {
+  "네이버": "naver.com", "naver": "naver.com", "다음": "daum.net", "카카오뱅크": "kakaobank.com", "카카오톡": "kakao.com", "카카오": "kakao.com", "kakao": "kakao.com",
+  "구글": "google.com", "google": "google.com", "지메일": "gmail.com", "gmail": "gmail.com", "유튜브": "youtube.com", "youtube": "youtube.com",
+  "페이스북": "facebook.com", "facebook": "facebook.com", "인스타그램": "instagram.com", "인스타": "instagram.com", "instagram": "instagram.com",
+  "트위터": "x.com", "twitter": "x.com", "링크드인": "linkedin.com", "linkedin": "linkedin.com", "왓츠앱": "whatsapp.com", "whatsapp": "whatsapp.com",
+  "텔레그램": "telegram.org", "디스코드": "discord.com", "넷플릭스": "netflix.com", "netflix": "netflix.com", "티빙": "tving.com", "웨이브": "wavve.com",
+  "디즈니플러스": "disneyplus.com", "스포티파이": "spotify.com", "spotify": "spotify.com", "쿠팡이츠": "coupangeats.com", "쿠팡": "coupang.com", "coupang": "coupang.com",
+  "지마켓": "gmarket.co.kr", "옥션": "auction.co.kr", "11번가": "11st.co.kr", "배달의민족": "baemin.com", "배민": "baemin.com", "당근": "daangn.com",
+  "아마존": "amazon.com", "amazon": "amazon.com", "이베이": "ebay.com", "ebay": "ebay.com", "페이팔": "paypal.com", "paypal": "paypal.com",
+  "삼성계정": "account.samsung.com", "삼성": "samsung.com", "애플": "apple.com", "apple": "apple.com", "아이클라우드": "icloud.com", "icloud": "icloud.com",
+  "마이크로소프트": "microsoft.com", "microsoft": "microsoft.com", "아웃룩": "outlook.com", "outlook": "outlook.com", "깃허브": "github.com", "github": "github.com",
+  "챗gpt": "chatgpt.com", "chatgpt": "chatgpt.com", "클로드": "claude.ai", "claude": "claude.ai",
+  "피델리티": "fidelity.com", "fidelity": "fidelity.com", "로빈후드": "robinhood.com", "robinhood": "robinhood.com", "체이스": "chase.com", "chase": "chase.com",
+  "뱅크오브아메리카": "bankofamerica.com", "웰스파고": "wellsfargo.com", "토스": "toss.im", "국민은행": "kbstar.com", "신한은행": "shinhan.com", "우리은행": "wooribank.com",
+  "하나은행": "hanabank.com", "농협": "nonghyup.com", "홈택스": "hometax.go.kr", "정부24": "gov.kr",
+};
+function guessUrl(name) {
+  const n = (name || "").toLowerCase().replace(/[\s·_-]+/g, "");
+  let best = "", url = "";
+  if (n) for (const [k, v] of Object.entries(SITE_URLS)) if (n.includes(k) && k.length > best.length) { best = k; url = v; }
+  return url;
+}
 
 // 브라우저 공유 메뉴 → "비밀번호 금고"로 들어온 주소/제목 (manifest share_target)
 const pendingShare = (() => {
@@ -122,7 +147,7 @@ function armLock() {
   lockTimer = setTimeout(() => lock("자동으로 잠갔어요"), m * 60000);
 }
 function lock(msg) {
-  key = null; entries = []; clearTimeout(lockTimer);
+  key = null; entries = []; clearTimeout(lockTimer); selecting = false; selected.clear(); delAsk = false; renderSelBar();
   ["#detail", "#editor", "#settings"].forEach(s => { $(s).hidden = true; $(s).innerHTML = ""; });
   $("#list").innerHTML = ""; $("#emptyBox").innerHTML = ""; $("#count").textContent = "";
   showLock(); if (msg) toast(msg);
@@ -168,11 +193,16 @@ async function showLock() {
         key = await Vault.unlock(pw);
         if (!key) { stat(`<div class="status err">마스터 비밀번호가 맞지 않아요.</div>`); $("#mpw").select(); return; }
       }
-      el.hidden = true; el.innerHTML = ""; await reload(); armLock();
+      el.hidden = true; el.innerHTML = ""; await reload(); armLock(); await fillMissingUrls();
       if (pendingShare && !showLock.shared) { showLock.shared = true; pendingShare.noteText ? openImporter(pendingShare.noteText) : openEditor(null, pendingShare); }
     } finally { go.disabled = false; }
   };
   setTimeout(() => $("#mpw")?.focus(), 50);
+}
+async function fillMissingUrls() {
+  let n = 0;
+  for (const e of entries) if (!e.url) { const u = guessUrl(e.site); if (u) { e.url = u; await Vault.save(key, e); n++; } }
+  if (n) { render(); toast(`${n}개 항목에 사이트 주소를 채웠어요`, 2500); }
 }
 function toggleEye(b) { const i = $("#" + b.dataset.eye); i.type = i.type === "password" ? "text" : "password"; b.innerHTML = i.type === "password" ? ICON.eye : ICON.eyeoff; }
 
@@ -191,31 +221,51 @@ function render() {
   const favN = entries.filter(e => e.favorite).length;
   $("#rail").innerHTML = [`<button class="chip" data-cat="전체" aria-pressed="${filter === "전체" && !favOnly}">전체<b>${entries.length}</b></button>`,
     `<button class="chip" data-fav aria-pressed="${favOnly}">★ 즐겨찾기<b>${favN}</b></button>`,
-    ...CATS.filter(c => counts[c]).map(c => `<button class="chip" data-cat="${c}" aria-pressed="${filter === c && !favOnly}">${c}<b>${counts[c]}</b></button>`)].join("");
+    ...CATS.filter(c => counts[c]).map(c => `<button class="chip" data-cat="${c}" aria-pressed="${filter === c && !favOnly}">${c}<b>${counts[c]}</b></button>`),
+    ...(entries.length ? [`<button class="chip" data-select aria-pressed="${selecting}">선택 삭제</button>`] : [])].join("");
   let list = entries.filter(e => (favOnly ? e.favorite : (filter === "전체" || (e.category || "기타") === filter)) &&
     (!q || [e.site, e.url, e.username, e.note, e.category].some(v => (v || "").toLowerCase().includes(q))));
   list = sorted(list);
   $("#count").textContent = entries.length ? `${list.length}/${entries.length}` : "";
+  visibleIds = list.map(e => e.id); renderSelBar();
   $("#list").innerHTML = list.map(e => {
     const st = strength(e.password), tags = [`<span class="tag cat">${esc(e.category || "기타")}</span>`];
     if (e.password && reuse.get(e.password) > 1) tags.push(`<span class="tag warn">재사용</span>`);
     if (e.password && st.score <= 1) tags.push(`<span class="tag bad">${esc(st.label)}</span>`);
-    return `<div class="item" role="button" tabindex="0" data-open="${e.id}">${avatar(e)}
+    return `<div class="item${selecting && selected.has(e.id) ? " picked" : ""}" role="button" tabindex="0" data-open="${e.id}">${avatar(e)}
       <div class="meta"><div class="n">${e.favorite ? '<span class="star">★</span>' : ""}<span>${esc(e.site || host(e.url) || "(이름 없음)")}</span></div>
       <div class="c">${esc(e.username || host(e.url) || "")}</div><div>${tags.join("")}</div></div>
-      <div class="quick"><button class="qbtn" data-copypw="${e.id}" aria-label="비밀번호 복사" title="비밀번호 복사">${ICON.copy}</button></div></div>`;
+      <div class="quick">${selecting ? `<div class="qbtn" style="font-weight:700;${selected.has(e.id) ? "background:var(--accent);color:var(--bg);border-color:var(--accent)" : ""}">${selected.has(e.id) ? "✓" : ""}</div>` : `<button class="qbtn" data-copypw="${e.id}" aria-label="비밀번호 복사" title="비밀번호 복사">${ICON.copy}</button>`}</div></div>`;
   }).join("");
   $("#emptyBox").innerHTML = entries.length ? (list.length ? "" : `<div class="empty">검색 결과가 없어요</div>`) :
     `<div class="empty"><h2>아직 저장된 비밀번호가 없어요</h2><p>오른쪽 아래 <b>추가</b>를 눌러 하나씩 저장하거나,<br>메모에 적어둔 목록을 한 번에 옮기세요.</p><div class="btnrow" style="margin-top:14px;justify-content:center"><button class="btn primary" data-import-note style="flex:none;padding:0 20px">메모 붙여넣어 가져오기</button></div></div>`;
 }
 $("#q").oninput = render; $("#sort").onchange = render;
-$("#rail").onclick = e => { const b = e.target.closest(".chip"); if (!b) return; if (b.hasAttribute("data-fav")) favOnly = !favOnly; else { favOnly = false; filter = b.dataset.cat; } render(); };
+$("#rail").onclick = e => { const b = e.target.closest(".chip"); if (!b) return; if (b.hasAttribute("data-select")) { selecting = !selecting; selected.clear(); delAsk = false; render(); return; } if (b.hasAttribute("data-fav")) favOnly = !favOnly; else { favOnly = false; filter = b.dataset.cat; } render(); };
+function renderSelBar() {
+  const bar = $("#selbar"); $("#fab").hidden = selecting;
+  if (!selecting) { bar.hidden = true; delAsk = false; return; }
+  bar.hidden = false;
+  const n = selected.size, all = n && visibleIds.every(id => selected.has(id));
+  bar.innerHTML = delAsk
+    ? `<span style="flex:1;font-size:14px"><b>${n}개를 삭제할까요?</b> 되돌릴 수 없어요.</span><button class="btn" data-selcancel style="flex:none;min-width:70px">아니오</button><button class="btn danger" data-seldel style="flex:none;min-width:70px">삭제</button>`
+    : `<button class="btn" data-selall style="flex:none;min-width:86px">${all ? "선택 해제" : "전체 선택"}</button><span style="flex:1;text-align:center;font-size:14px">${n}개 선택</span><button class="btn" data-selexit style="flex:none;min-width:60px">닫기</button><button class="btn danger" data-selgo ${n ? "" : "disabled"} style="flex:none;min-width:70px">삭제</button>`;
+}
+$("#selbar").onclick = async e => {
+  const t = e.target.closest("button"); if (!t || t.disabled) return;
+  if (t.hasAttribute("data-selall")) { const all = visibleIds.every(id => selected.has(id)); visibleIds.forEach(id => all ? selected.delete(id) : selected.add(id)); delAsk = false; render(); }
+  else if (t.hasAttribute("data-selexit")) { selecting = false; selected.clear(); render(); }
+  else if (t.hasAttribute("data-selgo")) { delAsk = true; renderSelBar(); }
+  else if (t.hasAttribute("data-selcancel")) { delAsk = false; renderSelBar(); }
+  else if (t.hasAttribute("data-seldel")) { const n = selected.size; for (const id of selected) await Vault.remove(id); selecting = false; selected.clear(); delAsk = false; await reload(); toast(`${n}개 삭제했어요`); }
+};
 $("#list").onclick = async e => {
+  if (selecting) { const it = e.target.closest("[data-open]"); if (it) { const id = it.dataset.open; selected.has(id) ? selected.delete(id) : selected.add(id); delAsk = false; render(); } return; }
   const c = e.target.closest("[data-copypw]"); if (c) { e.stopPropagation(); const en = entries.find(x => x.id === c.dataset.copypw); if (en) { await copy(en.password, "비밀번호 복사", true); touch(en); } return; }
   const it = e.target.closest("[data-open]"); if (it) openDetail(it.dataset.open);
 };
 $("#emptyBox").onclick = e => { if (e.target.closest("[data-import-note]")) openImporter(); };
-$("#list").onkeydown = e => { if (e.key === "Enter") { const it = e.target.closest("[data-open]"); if (it) openDetail(it.dataset.open); } };
+$("#list").onkeydown = e => { if (e.key === "Enter") { const it = e.target.closest("[data-open]"); if (it) it.click(); } };
 $("#fab").onclick = () => openEditor(null);
 $("#lockBtn").onclick = () => lock();
 $("#menuBtn").onclick = openSettings;
@@ -290,15 +340,20 @@ function openEditor(id, preset) {
         <div class="f"><label>메모 (보안 질문 답, 가입 전화번호 등)</label><textarea id="f_note">${esc(d.note)}</textarea></div>
         <div id="eStat"></div>
       </form>
+      ${c ? `<button type="button" class="btn danger" data-edel>이 항목 삭제</button><div id="eDelBox"></div>` : ""}
     </div></div>`;
   const regen = () => { Object.assign(go, { length: +$("#genRange").value, upper: $("#g_upper").checked, lower: $("#g_lower").checked, digit: $("#g_digit").checked, symbol: $("#g_symbol").checked, noAmbig: $("#g_noamb").checked }); $("#genOut").textContent = genPassword(go); $("#genLen").textContent = go.length; };
   $("#f_pw").oninput = e => updateMeter(e.target.value);
   $("#genRange").oninput = regen; $("#gen").onchange = regen;
+  $("#f_site").onblur = () => { if (!$("#f_url").value.trim()) $("#f_url").value = guessUrl($("#f_site").value); };
   $("#f_url").onblur = () => { if (!$("#f_site").value && $("#f_url").value) $("#f_site").value = host($("#f_url").value).split(".")[0]; };
-  el.onclick = e => {
+  el.onclick = async e => {
     const t = e.target.closest("button"); if (!t) return;
     if (t.hasAttribute("data-close")) { el.hidden = true; el.innerHTML = ""; }
     else if (t.hasAttribute("data-eye")) toggleEye(t);
+    else if (t.hasAttribute("data-edel")) $("#eDelBox").innerHTML = `<div class="confirm" style="margin-top:8px"><b>이 항목을 삭제할까요?</b><span class="small">되돌릴 수 없어요.</span><div class="btnrow"><button type="button" class="btn" data-ecancel>취소</button><button type="button" class="btn danger" data-edelyes>삭제</button></div></div>`;
+    else if (t.hasAttribute("data-ecancel")) $("#eDelBox").innerHTML = "";
+    else if (t.hasAttribute("data-edelyes")) { await Vault.remove(c.id); el.hidden = true; el.innerHTML = ""; $("#detail").hidden = true; await reload(); toast("삭제했어요"); }
     else if (t.hasAttribute("data-paste")) {
       navigator.clipboard.readText().then(txt => {
         const u = (txt || "").match(/https?:\/\/\S+|[\w-]+(\.[\w-]+)+\S*/)?.[0];
@@ -312,7 +367,7 @@ function openEditor(id, preset) {
   };
   $("#ef").onsubmit = async e => {
     e.preventDefault();
-    const body = { id: d.id || uid(), site: $("#f_site").value.trim(), url: $("#f_url").value.trim(), username: $("#f_user").value.trim(), password: $("#f_pw").value,
+    const body = { id: d.id || uid(), site: $("#f_site").value.trim(), url: $("#f_url").value.trim() || guessUrl($("#f_site").value), username: $("#f_user").value.trim(), password: $("#f_pw").value,
       note: $("#f_note").value.trim(), category: $("#f_cat").value, favorite: $("#f_fav").value === "1", createdAt: d.createdAt || Date.now(), updatedAt: Date.now(), lastUsed: d.lastUsed || 0 };
     if (!body.site) { $("#eStat").innerHTML = `<div class="status err">사이트 이름을 입력해 주세요.</div>`; return; }
     try { await Vault.save(key, body); el.hidden = true; el.innerHTML = ""; await reload(); if (!$("#detail").hidden) openDetail(body.id); toast("저장했어요"); }
@@ -365,6 +420,7 @@ function parseOne(s) {
   if (toks.length) notes.unshift(toks.join(" "));
   e.note = notes.join(" · ");
   if (!e.site) e.site = host(e.url).split(".")[0];
+  if (!e.url) e.url = guessUrl(e.site);
   // 비밀번호에 영문·숫자가 하나도 없으면 ("할일: 우유 사기") 계정 정보가 아님
   if (!e.password || !/[A-Za-z0-9]/.test(e.password)) return null;
   if (!e.site && !e.username) return null;
@@ -531,7 +587,7 @@ async function importCSV(file) {
     let n = 0, up = 0;
     for (const r of rows.slice(1)) {
       const g = i => i >= 0 ? (r[i] || "").trim() : "";
-      const url = g(iUrl), site = g(iName) || host(url).split(".")[0] || url; if (!site) continue;
+      const site = g(iName) || host(g(iUrl)).split(".")[0] || g(iUrl), url = g(iUrl) || guessUrl(site); if (!site) continue;
       const body = { site, url, username: g(iUser), password: g(iPw), note: g(iNote), category: CATS.includes(g(iCat)) ? g(iCat) : "기타", favorite: false, createdAt: Date.now(), updatedAt: Date.now(), lastUsed: 0 };
       const ex = byKey.get((site + "|" + body.username).toLowerCase());
       if (ex) { Object.assign(ex, { url: body.url || ex.url, password: body.password || ex.password, note: body.note || ex.note, updatedAt: Date.now() }); await Vault.save(key, ex); up++; }

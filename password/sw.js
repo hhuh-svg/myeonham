@@ -1,5 +1,5 @@
 // 오프라인 실행용: 앱 파일만 캐시합니다. (비밀번호 데이터는 IndexedDB에 별도 암호화 저장)
-const VER = "pwvault-v5";
+const VER = "pwvault-v6";
 const FILES = ["./", "index.html", "app.js", "vault.js", "manifest.webmanifest",
   "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(VER).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });
