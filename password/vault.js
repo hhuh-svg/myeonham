@@ -10,11 +10,11 @@ const Vault = (() => {
 
   function open() {
     return new Promise((ok, no) => {
-      const r = indexedDB.open(DB, 1);
+      const r = indexedDB.open(DB, 2);
       r.onupgradeneeded = () => {
         const d = r.result;
-        d.createObjectStore("meta", { keyPath: "k" });
-        d.createObjectStore("entries", { keyPath: "id" });
+        for (const [n, o] of [["meta", { keyPath: "k" }], ["entries", { keyPath: "id" }], ["session", { keyPath: "k" }]])
+          if (!d.objectStoreNames.contains(n)) d.createObjectStore(n, o);
       };
       r.onsuccess = () => ok(r.result); r.onerror = () => no(r.error);
     });
@@ -97,7 +97,15 @@ const Vault = (() => {
       });
       return key;
     },
-    async wipe() { await clear("entries"); await clear("meta"); },
+    async wipe() { await clear("entries"); await clear("meta"); await clear("session"); },
+    // 잠금 해제 상태 유지: 추출 불가(non-extractable) CryptoKey를 IndexedDB에 보관, 만료/잠금 시 삭제
+    saveSession: key => put("session", { k: "key", key, lastActive: Date.now() }),
+    loadSession: async () => (await getAll("session"))[0] || null,
+    clearSession: () => clear("session"),
+    async checkKey(key) {
+      const m = await getMeta(); if (!m) return false;
+      try { return (await decrypt(key, { iv: m.verifyIv, ct: m.verifyCt })) === VERIFY; } catch { return false; }
+    },
     async exportBackup() {
       const meta = await getMeta(); if (!meta) return null;
       return { app: "pwvault", v: 1, exportedAt: new Date().toISOString(), kdf: meta, entries: await getAll("entries") };
