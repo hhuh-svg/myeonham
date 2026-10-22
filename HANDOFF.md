@@ -60,3 +60,41 @@ claude.ai 아티팩트 버전도 있음 (Claude 서버 저장 + Claude 비전 OC
 python3 -m http.server 8000   # 저장소 폴더에서
 # http://localhost:8000 접속 (서비스워커는 https/localhost에서만 동작)
 ```
+
+---
+
+# 비밀번호 금고 (`password/`) 인수인계서
+
+작성: 2026-10-22 · 같은 저장소의 **별도 PWA**. 배포 주소(예정): **https://hhuh-svg.github.io/myeonham/password/** (Pages는 저장소 단위라 명함첩을 켜면 같이 켜짐). 폰에서 이 주소를 열어 홈 화면에 추가하면 명함첩과 별개 아이콘(초록 자물쇠)으로 설치됨.
+
+## 목표
+사이트마다 헷갈리는 비밀번호를 **내 폰에만 암호화해 보관**하는 개인용 금고. 명함첩과 같은 원칙: 외부 서버 호출 없음, 데이터는 브라우저 안에만.
+
+## 구조
+```
+password/index.html   화면·스타일 (명함첩과 같은 레이아웃 문법, 초록 테마)
+password/vault.js     암호화·저장 계층 (아래 설계 참고)
+password/app.js       UI: 잠금화면, 목록/검색/분류/즐겨찾기, 상세, 편집+생성기, 설정(백업·복원·CSV·마스터 변경·전체 삭제)
+password/sw.js        오프라인 캐시 (pwvault-v1)
+password/manifest.webmanifest, icon-*.png, apple-touch-icon.png
+```
+
+## 설계
+- **암호화:** 마스터 비밀번호 → PBKDF2-SHA256 60만 회 + 16바이트 salt → AES-GCM 256 키. 키는 메모리에만 있고 잠그면 버림. 항목마다 IV 새로 생성해 개별 암호화. 마스터 비밀번호 검증은 `verifyCt`(고정 문자열 암호문) 복호화 성공 여부로 판단.
+- **저장:** IndexedDB `pwvault` — `meta`(salt, iter, verify), `entries`(id, iv, ct, updatedAt). 평문은 저장소 어디에도 없음(헤드리스 테스트로 확인).
+- **항목 필드:** site, url, username, password, note, category, favorite, createdAt, updatedAt, lastUsed
+- **분류:** 업무, 금융, 쇼핑, 소셜, 이메일, 엔터테인먼트, 공공·행정, 기타
+- **기능:** 비밀번호 생성기(8~40자, 문자종류, 헷갈리는 글자 제외), 강도 표시(엔트로피+흔한 패턴 감점), 재사용·약함 경고 태그, 즐겨찾기(맨 위 고정), 정렬(이름/최신/최근 사용), 복사 후 30초 뒤 클립보드 비움, 자동 잠금(1/5/15/30분/안 함, 다른 앱 갔다 와도 시간 지났으면 잠금).
+- **백업:** 암호화된 JSON(= IndexedDB 내용 그대로) → Web Share로 드라이브 저장 가능. 복원 시 현재 키로 먼저 시도, 안 되면 그 백업의 마스터 비밀번호를 물음(id 기준 덮어쓰기). 마스터 변경 시 전체 재암호화.
+- **CSV:** 크롬/삼성패스/Bitwarden 형식(name,url,username,password,note 열) 가져오기 — 같은 사이트+아이디는 갱신. 내보내기는 **평문**이라 경고 후 진행.
+- 사이트 아이콘은 외부 파비콘 서비스 대신 **첫 글자 아바타**로 처리 (어느 사이트를 쓰는지 외부에 안 알리기 위해).
+
+## 알려진 한계 / 다음 할 일
+1. 웹사이트 자동 입력(autofill)은 PWA로는 불가 — 복사해서 붙여넣는 방식. 필요하면 안드로이드 자동완성 서비스는 네이티브 앱이어야 함.
+2. 마스터 비밀번호 분실 시 복구 수단 없음(의도된 설계). 지문 잠금(WebAuthn) 미구현 — 추가하려면 키 래핑 방식으로 확장 필요.
+3. 브라우저 데이터 삭제/폰 분실 대비 정기 백업 필요(설정 화면에 안내 있음).
+
+## 로컬 테스트
+```bash
+python3 -m http.server 8000   # 저장소 루트에서 → http://localhost:8000/password/
+```
