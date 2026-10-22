@@ -1055,10 +1055,37 @@ async function fetchMuniCurve() {
   const dm = text.match(/(?:as of|updated|yields for)\s*:?\s*([A-Z][a-z]+ \d{1,2}, \d{4}|\d{1,2}\/\d{1,2}\/\d{2,4})/i);
   return { rows: rows.sort((a, b) => a.years - b.years), date: dm ? dm[1] : "", src: "FMSbonds AAA 등급 지방채 수익률" };
 }
+// AAA 곡선을 못 가져오면 대표 지방채 ETF의 분배율(지난 12개월 분배금 ÷ 가격)로 대신 보여줌
+const MUNI_ETFS = [
+  { sym: "SUB", label: "단기 국가 지방채 (iShares)" },
+  { sym: "VTES", label: "단기 비과세 채권 (Vanguard)" },
+  { sym: "MUB", label: "국가 지방채 전체 (iShares)" },
+  { sym: "VTEB", label: "비과세 채권 전체 (Vanguard)" },
+  { sym: "HYD", label: "하이일드 지방채 (VanEck)" }
+];
+let muniEtfData = null;
+async function fetchMuniEtfYields() {
+  const got = await fetchQuotesFallback(MUNI_ETFS.map(m => m.sym));
+  const rows = MUNI_ETFS.map(m => ({ ...m, q: got[m.sym] })).filter(r => r.q);
+  if (!rows.length) throw new Error("지방채 ETF 시세 없음");
+  return rows;
+}
 let muniCurveData = null, muniCurveErr = "";
 function renderMuniCurve() {
   const card = $("#muniRateCard");
   if (!card) return;
+  if (!muniCurveData && muniEtfData) {
+    card.innerHTML = `
+      <h2><span class="lbl">지방채 ETF 분배율 (대표 종목)</span></h2>
+      <div class="small" style="margin-bottom:4px">지난 12개월 분배금 ÷ 현재가 · 연 %, 연방세 면제</div>
+      ${muniEtfData.map((r, i) => `<div class="etfRow" style="grid-template-columns:1fr auto;${i === 0 ? "border-top:0" : ""}">
+        <div><div class="sym">${r.sym}</div><div class="nm">${escapeHtml(r.label)} · $${fmt(r.q.price)}</div></div>
+        <div class="px">${r.q.div && r.q.div.yield != null ? fmt(r.q.div.yield) + "%" : "—"}</div>
+      </div>`).join("")}
+      <p class="note">지방채 AAA 수익률 곡선을 못 가져와서(${escapeHtml(muniCurveErr || "소스 응답 없음")}) 대표 지방채 ETF의 분배율로 대신 보여줍니다. 만기수익률(YTM)과는 다른 참고치예요.</p>
+    `;
+    return;
+  }
   if (!muniCurveData) {
     card.innerHTML = `<h2><span class="lbl">지방채 수익률 (AAA 등급)</span></h2><div class="status err">가져오지 못했습니다${muniCurveErr ? ` (${escapeHtml(muniCurveErr)})` : ""}.</div><p class="note">지방채는 국채처럼 정부가 고시하는 금리가 없어서, 지방채 딜러가 공개하는 AAA 등급 수익률 곡선을 대신 보여줍니다. 실제 매물은 <a href="https://www.fidelity.com/fixed-income-bonds/municipal-bonds" target="_blank" rel="noopener">피델리티 지방채 화면 ↗</a>에서 확인.</p>`;
     return;
@@ -1087,7 +1114,11 @@ function renderTreasury() {
 }
 async function loadMuniBench(force) {
   benchLoadedFor.muni = true;
-  fetchMuniCurve().then(d => { muniCurveData = d; muniCurveErr = ""; renderMuniCurve(); }).catch(e => { muniCurveData = null; muniCurveErr = e.message; renderMuniCurve(); });
+  fetchMuniCurve().then(d => { muniCurveData = d; muniCurveErr = ""; renderMuniCurve(); }).catch(async e => {
+    muniCurveData = null; muniCurveErr = e.message;
+    try { muniEtfData = await fetchMuniEtfYields(); } catch (e2) { muniEtfData = null; muniCurveErr += " / ETF: " + e2.message; }
+    renderMuniCurve();
+  });
   // MMF 7일 수익률 자동 조회(CNBC의 dividendyield) — 재무부 금리표와 동시에 진행
   fetchQuotesCnbc([mmfGet().ticker]).then(q => {
     const d = q[mmfGet().ticker] && q[mmfGet().ticker].div;
