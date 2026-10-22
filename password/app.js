@@ -7,7 +7,7 @@ const AUTOLOCK_KEY = "pwvault.autolock";
 const CLIP_CLEAR_MS = 30000;
 
 let key = null, entries = [], filter = "전체", favOnly = false, lockTimer = null, hiddenAt = 0, lastCopy = null;
-let selecting = false, selected = new Set(), visibleIds = [], delAsk = false;
+let selecting = false, selected = new Set(), visibleIds = [], delAsk = false, prefAsk = false;
 
 // 이름만 보고 주소를 채워주는 자주 쓰는 사이트 목록 (키: 소문자·공백 제거)
 const SITE_URLS = {
@@ -24,7 +24,7 @@ const SITE_URLS = {
   "챗gpt": "chatgpt.com", "chatgpt": "chatgpt.com", "클로드": "claude.ai", "claude": "claude.ai",
   "피델리티": "fidelity.com", "fidelity": "fidelity.com", "로빈후드": "robinhood.com", "robinhood": "robinhood.com", "체이스": "chase.com", "chase": "chase.com",
   "뱅크오브아메리카": "bankofamerica.com", "웰스파고": "wellsfargo.com", "토스": "toss.im", "국민은행": "kbstar.com", "신한은행": "shinhan.com", "우리은행": "wooribank.com",
-  "하나은행": "hanabank.com", "농협": "nonghyup.com", "홈택스": "hometax.go.kr", "정부24": "gov.kr",
+  "하나은행": "hanabank.com", "농협": "nonghyup.com", "홈택스": "hometax.go.kr", "정부24": "gov.kr", "렌트홈": "renthome.go.kr",
 };
 function guessUrl(name) {
   const n = (name || "").toLowerCase().replace(/[\s·_-]+/g, "");
@@ -147,7 +147,7 @@ function armLock() {
   lockTimer = setTimeout(() => lock("자동으로 잠갔어요"), m * 60000);
 }
 function lock(msg) {
-  key = null; entries = []; clearTimeout(lockTimer); selecting = false; selected.clear(); delAsk = false; renderSelBar();
+  key = null; entries = []; clearTimeout(lockTimer); selecting = false; selected.clear(); delAsk = prefAsk = false; renderSelBar();
   ["#detail", "#editor", "#settings"].forEach(s => { $(s).hidden = true; $(s).innerHTML = ""; });
   $("#list").innerHTML = ""; $("#emptyBox").innerHTML = ""; $("#count").textContent = "";
   showLock(); if (msg) toast(msg);
@@ -244,19 +244,30 @@ $("#q").oninput = render; $("#sort").onchange = render;
 $("#rail").onclick = e => { const b = e.target.closest(".chip"); if (!b) return; if (b.hasAttribute("data-select")) { selecting = !selecting; selected.clear(); delAsk = false; render(); return; } if (b.hasAttribute("data-fav")) favOnly = !favOnly; else { favOnly = false; filter = b.dataset.cat; } render(); };
 function renderSelBar() {
   const bar = $("#selbar"); $("#fab").hidden = selecting;
-  if (!selecting) { bar.hidden = true; delAsk = false; return; }
-  bar.hidden = false;
-  const n = selected.size, all = n && visibleIds.every(id => selected.has(id));
-  bar.innerHTML = delAsk
-    ? `<span style="flex:1;font-size:14px"><b>${n}개를 삭제할까요?</b> 되돌릴 수 없어요.</span><button class="btn" data-selcancel style="flex:none;min-width:70px">아니오</button><button class="btn danger" data-seldel style="flex:none;min-width:70px">삭제</button>`
-    : `<button class="btn" data-selall style="flex:none;min-width:86px">${all ? "선택 해제" : "전체 선택"}</button><span style="flex:1;text-align:center;font-size:14px">${n}개 선택</span><button class="btn" data-selexit style="flex:none;min-width:60px">닫기</button><button class="btn danger" data-selgo ${n ? "" : "disabled"} style="flex:none;min-width:70px">삭제</button>`;
+  if (!selecting) { bar.hidden = true; delAsk = prefAsk = false; return; }
+  bar.hidden = false; bar.style.flexWrap = "wrap";
+  const n = selected.size, all = n && visibleIds.every(id => selected.has(id)), B = 'class="btn" style="flex:none;min-width:70px;height:40px"';
+  if (delAsk) bar.innerHTML = `<span style="flex:1;font-size:14px"><b>${n}개를 삭제할까요?</b> 되돌릴 수 없어요.</span><button ${B} data-selcancel>아니오</button><button class="btn danger" style="flex:none;min-width:70px;height:40px" data-seldel>삭제</button>`;
+  else if (prefAsk) bar.innerHTML = `<div style="flex:1 1 100%;font-size:13px">선택한 ${n}개의 사이트 이름 앞에 붙일 말 (예: 렌트홈 → "렌트홈 · 허한권")</div><input id="prefInput" value="렌트홈" style="flex:1;min-width:0;height:40px;border:1px solid var(--line);border-radius:10px;background:var(--bg);padding:0 12px"><button ${B} data-selcancel>취소</button><button class="btn primary" style="flex:none;min-width:70px;height:40px" data-prefgo>적용</button>`;
+  else bar.innerHTML = `<button ${B} data-selall>${all ? "선택 해제" : "전체 선택"}</button><span style="flex:1;text-align:center;font-size:14px">${n}개 선택</span><button ${B} data-selexit>닫기</button><div style="flex:1 1 100%;display:flex;gap:8px"><button class="btn" data-selpref ${n ? "" : "disabled"} style="height:40px">이름 앞에 붙이기</button><button class="btn danger" data-selgo ${n ? "" : "disabled"} style="height:40px">삭제</button></div>`;
 }
 $("#selbar").onclick = async e => {
   const t = e.target.closest("button"); if (!t || t.disabled) return;
   if (t.hasAttribute("data-selall")) { const all = visibleIds.every(id => selected.has(id)); visibleIds.forEach(id => all ? selected.delete(id) : selected.add(id)); delAsk = false; render(); }
   else if (t.hasAttribute("data-selexit")) { selecting = false; selected.clear(); render(); }
   else if (t.hasAttribute("data-selgo")) { delAsk = true; renderSelBar(); }
-  else if (t.hasAttribute("data-selcancel")) { delAsk = false; renderSelBar(); }
+  else if (t.hasAttribute("data-selcancel")) { delAsk = prefAsk = false; renderSelBar(); }
+  else if (t.hasAttribute("data-selpref")) { prefAsk = true; renderSelBar(); setTimeout(() => $("#prefInput")?.select(), 30); }
+  else if (t.hasAttribute("data-prefgo")) {
+    const p = $("#prefInput").value.trim(); if (!p) return toast("붙일 말을 입력해 주세요");
+    let n = 0;
+    for (const id of selected) {
+      const en = entries.find(x => x.id === id); if (!en || en.site.startsWith(p + " ")) continue;
+      en.site = `${p} · ${en.site}`; if (!en.url) en.url = guessUrl(en.site); en.updatedAt = Date.now();
+      await Vault.save(key, en); n++;
+    }
+    selecting = false; selected.clear(); prefAsk = false; await reload(); toast(`${n}개 이름을 바꿨어요`);
+  }
   else if (t.hasAttribute("data-seldel")) { const n = selected.size; for (const id of selected) await Vault.remove(id); selecting = false; selected.clear(); delAsk = false; await reload(); toast(`${n}개 삭제했어요`); }
 };
 $("#list").onclick = async e => {
