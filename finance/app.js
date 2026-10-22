@@ -499,9 +499,24 @@ const OWNER_LABEL = { personal: "개인", llc: "LLC" };
 // 체이스 체킹(…1908) 잔고는 사용자 캡처(2026-10-22, Available balance) 기준으로 시딩 — 이후엔 자산 탭에서 직접 갱신
 const DEFAULT_CASH = [
   { id: "chase_chk", label: "체이스 체킹 (…1908)", balance: 1245141.74, owner: "personal", apy: 0 },
-  { id: "rh_cash", label: "로빈후드 현금", balance: 5000, owner: "personal", apy: 0 } // 사용자: "로빈후드 현금 5000 상태"(2026-10-22)
+  { id: "rh_cash", label: "로빈후드 현금", balance: 5000, owner: "personal", apy: 0 }, // 사용자: "로빈후드 현금 5000 상태"(2026-10-22)
+  // 피델리티 개인(JOINT WROS) Balances 캡처(2026-10-22): Cash & Credits $1,885,535.04 = core position SPAXX(정부 MMF)
+  { id: "fid_spaxx", label: "피델리티 SPAXX (개인 core)", ticker: "SPAXX", balance: 1885535.04, owner: "personal", apy: 0 }
 ];
-const CASH_VERSION = 2;
+const CASH_VERSION = 3;
+// 티커가 있는 현금성 계좌(SPAXX 등)는 MMF와 같은 방식으로 7일 수익률을 자동 조회(직접 입력한 이자율이 우선)
+const cashAutoYield = LS.get("cashYieldAuto", {}) || {};
+function cashApy(c) { if (c.apy > 0) return c.apy; const a = c.ticker && cashAutoYield[c.ticker]; return a && a.yield > 0 && Date.now() - a.at < 30 * 86400000 ? a.yield : null; }
+async function loadCashYields() {
+  const need = cashList().filter(c => c.ticker && !(c.apy > 0) && cashApy(c) == null);
+  if (!need.length) return false;
+  let changed = false;
+  await Promise.all([...new Set(need.map(c => c.ticker))].map(async t => {
+    try { const r = await fetchMmfYieldAuto(t); cashAutoYield[t] = { yield: r.yield, src: r.src, at: Date.now() }; changed = true; } catch {}
+  }));
+  if (changed) LS.set("cashYieldAuto", cashAutoYield);
+  return changed;
+}
 if (LS.get("cashVersion", 0) !== CASH_VERSION) { // 버전이 오르면 없는 계좌만 추가(사용자가 고친 잔고는 유지)
   const cur = LS.get("cash", null) || [];
   DEFAULT_CASH.forEach(d => { if (!cur.some(c => c.id === d.id)) cur.push({ ...d }); });
@@ -990,7 +1005,8 @@ let mmfAutoYield = null, mmfAutoSrc = "", mmfAutoErr = "";
 // MMF 7일 수익률 자동 조회: 시세 API(CNBC 등)는 MMF 수익률을 안 주므로, 펀드 요약 페이지(Yahoo·Google Finance)를
 // 프록시/jina 리더로 받아 "Yield x.xx%"를 찾는다. 되는 소스가 하나만 있으면 됨(동시에 시도, 30일 캐시).
 async function fetchMmfYieldAuto(ticker) {
-  const cached = LS.get("mmfYieldAuto", null);
+  const cacheKey = "mmfYieldAuto." + ticker;
+  const cached = LS.get(cacheKey, null);
   const parse = (text, src) => {
     const t = String(text).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ");
     const m = t.match(/\b(?:7[- ]?day\s+)?(?:sec\s+)?yield\b[^%\d]{0,40}?(\d{1,2}\.\d{1,3})\s*%/i);
@@ -1008,7 +1024,7 @@ async function fetchMmfYieldAuto(ticker) {
   ];
   try {
     const r = await raceOk(tasks);
-    LS.set("mmfYieldAuto", { ...r, at: Date.now() });
+    LS.set(cacheKey, { ...r, at: Date.now() });
     return r;
   } catch (e) {
     if (cached && cached.yield && Date.now() - cached.at < 30 * 86400000) return { ...cached, stale: true };
@@ -1595,7 +1611,8 @@ function renderCash() {
       <input class="qtyInput" data-cash-label="${escapeHtml(c.id)}" value="${escapeHtml(c.label)}" placeholder="계좌 이름" style="flex:1 1 110px;min-width:0">
       <input class="qtyInput" data-cash-bal="${escapeHtml(c.id)}" type="number" step="0.01" inputmode="decimal" value="${c.balance || ""}" placeholder="잔고 $" style="flex:1 1 110px;min-width:0">
       <select class="acctSel" data-cash-owner="${escapeHtml(c.id)}"><option value="personal"${c.owner === "personal" ? " selected" : ""}>개인</option><option value="llc"${c.owner === "llc" ? " selected" : ""}>LLC</option></select>
-      <input class="qtyInput" data-cash-apy="${escapeHtml(c.id)}" type="number" step="0.01" inputmode="decimal" value="${c.apy || ""}" placeholder="이자 %(선택)" style="flex:0 1 92px;min-width:0" title="연 이자율(선택)">
+      <input class="qtyInput" data-cash-apy="${escapeHtml(c.id)}" type="number" step="0.01" inputmode="decimal" value="${c.apy || ""}" placeholder="${c.ticker && cashApy(c) != null ? "자동 " + fmt(cashApy(c)) + "%" : "이자 %(선택)"}" style="flex:0 1 92px;min-width:0" title="연 이자율(선택)">
+      ${c.ticker ? `<span class="small" style="flex-basis:100%;margin-top:-4px">${escapeHtml(c.ticker)} · ${cashApy(c) != null ? (c.apy > 0 ? "직접 입력 " + fmt(c.apy) + "%" : `7일 수익률 자동 ${fmt(cashApy(c))}%${cashAutoYield[c.ticker] ? " (" + escapeHtml(cashAutoYield[c.ticker].src) + ")" : ""}`) : "7일 수익률 조회 중… (안 되면 직접 입력)"}</span>` : ""}
       <button class="delbtn" data-cash-del="${escapeHtml(c.id)}">삭제</button>
     </div>`).join("")}
     <div class="row"><button class="btn sm" id="cashAdd">+ 현금 계좌 추가</button></div>
@@ -1666,7 +1683,7 @@ function computeHome(etfData, owner = "all") {
     const b = c.balance || 0;
     if (!b) return;
     bump("cash:" + c.id, "cash", b);
-    if (owner === "all" || c.owner === owner) { cashValue += b; cashAnnual += b * (c.apy || 0) / 100; }
+    if (owner === "all" || c.owner === owner) { cashValue += b; cashAnnual += b * (cashApy(c) || 0) / 100; }
   });
   const total = etfValue + muniMv + govMv + mmfValue + cashValue;
   const muniAnnual = muni.reduce((s, h) => s + h.face * h.coupon / 100, 0);
@@ -1767,6 +1784,7 @@ async function loadHome(force) {
   if (!fxRate && !fxLoaded) { try { await loadFx(); } catch {} } // 원화 환산용
   renderHome(lastEtfData, false);
   setUpdated(nowLabel() + " 업데이트");
+  loadCashYields().then(changed => { if (changed) { renderCash(); renderHome(lastEtfData, false); } }); // SPAXX 등 현금성 계좌 이자율
 }
 
 // =========================================================
