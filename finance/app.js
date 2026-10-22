@@ -458,8 +458,17 @@ const ACCOUNTS = [
   { key: "chase", label: "체이스(JPM MMF)", owner: null } // 소유자는 MMF 카드에서 선택(chaseOwner)
 ];
 const OWNER_LABEL = { personal: "개인", llc: "LLC" };
-function acctOwner(key) { const a = ACCOUNTS.find(x => x.key === key); if (!a) return null; return a.owner || LS.get("chaseOwner", "personal"); }
-function acctLabel(key) { const a = ACCOUNTS.find(x => x.key === key); return a ? a.label : "구분 없음"; }
+// 현금 계좌(체이스 체킹 등): 자산 탭 카드에서 잔고·소유를 직접 입력. key는 "cash:<id>"
+const DEFAULT_CASH = [{ id: "chase_chk", label: "체이스 체킹", balance: 0, owner: "personal", apy: 0 }];
+function cashList() { return LS.get("cash", DEFAULT_CASH); }
+function acctOwner(key) {
+  if (key && key.startsWith("cash:")) { const c = cashList().find(x => "cash:" + x.id === key); return c ? c.owner : null; }
+  const a = ACCOUNTS.find(x => x.key === key); if (!a) return null; return a.owner || LS.get("chaseOwner", "personal");
+}
+function acctLabel(key) {
+  if (key && key.startsWith("cash:")) { const c = cashList().find(x => "cash:" + x.id === key); return c ? c.label : "현금"; }
+  const a = ACCOUNTS.find(x => x.key === key); return a ? a.label : "구분 없음";
+}
 function acctOptions(selected) { return `<option value=""${!selected ? " selected" : ""}>구분 없음</option>${ACCOUNTS.map(a => `<option value="${a.key}"${a.key === selected ? " selected" : ""}>${a.label}</option>`).join("")}`; }
 // ETF·주식은 계좌별 수량/매입금액을 따로 저장(etfByAcct)하고, 기존 총수량(etfQty)·단가(etfCost)는 그 합으로 유지
 function etfByAcctAll() { return LS.get("etfByAcct", {}) || {}; }
@@ -1442,6 +1451,7 @@ function homeSkeleton() {
     <div class="card" id="homeTotal"><h2><span class="lbl">총자산 (평가액 기준, 세전)</span></h2><div class="status">불러오는 중…</div></div>
     <div class="card" id="homeAlloc"><h2><span class="lbl">자산 배분</span></h2><div class="status">불러오는 중…</div></div>
     <div class="card" id="homeAcct"><h2><span class="lbl">계좌별 자산</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="card" id="homeCash"></div>
     <div class="card" id="homeIncome"><h2><span class="lbl">연간 예상 수입</span></h2><div class="status">불러오는 중…</div></div>
     <div class="card" id="homeTop"><h2><span class="lbl">상위 비중 종목</span></h2><div class="status">불러오는 중…</div></div>
     <div class="card" id="homeMovers"><h2><span class="lbl">오늘 등락</span></h2><div class="status">불러오는 중…</div></div>
@@ -1475,6 +1485,7 @@ function homeSkeleton() {
     $$("#homeOwnerRow .seg").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
     renderHome(lastEtfData, !etfLoadedOnce);
   }));
+  renderCash();
   $("#backupBtn").addEventListener("click", backupData);
   $("#restoreBtn").addEventListener("click", () => $("#restoreFile").click());
   $("#restoreFile").addEventListener("change", restoreData);
@@ -1521,6 +1532,31 @@ function restoreData(e) {
   reader.readAsText(f);
   e.target.value = "";
 }
+function renderCash() {
+  const card = $("#homeCash");
+  if (!card) return;
+  const list = cashList();
+  card.innerHTML = `
+    <h2><span class="lbl">현금 계좌 (체킹·세이빙)</span></h2>
+    ${list.map(c => `<div class="row" style="align-items:center;gap:6px;margin-bottom:8px;flex-wrap:wrap">
+      <input class="qtyInput" data-cash-label="${escapeHtml(c.id)}" value="${escapeHtml(c.label)}" placeholder="계좌 이름" style="flex:1 1 110px;min-width:0">
+      <input class="qtyInput" data-cash-bal="${escapeHtml(c.id)}" type="number" step="0.01" inputmode="decimal" value="${c.balance || ""}" placeholder="잔고 $" style="flex:1 1 110px;min-width:0">
+      <select class="acctSel" data-cash-owner="${escapeHtml(c.id)}"><option value="personal"${c.owner === "personal" ? " selected" : ""}>개인</option><option value="llc"${c.owner === "llc" ? " selected" : ""}>LLC</option></select>
+      <input class="qtyInput" data-cash-apy="${escapeHtml(c.id)}" type="number" step="0.01" inputmode="decimal" value="${c.apy || ""}" placeholder="이자 %(선택)" style="flex:0 1 92px;min-width:0" title="연 이자율(선택)">
+      <button class="delbtn" data-cash-del="${escapeHtml(c.id)}">삭제</button>
+    </div>`).join("")}
+    <div class="row"><button class="btn sm" id="cashAdd">+ 현금 계좌 추가</button></div>
+    <p class="note">잔고는 직접 입력(은행 앱 잔고). 총자산·자산 배분·계좌별 자산에 합산되고, 이자율을 적으면 연간 수입에도 들어갑니다.</p>
+  `;
+  const save = (id, patch) => { const l = cashList(); const c = l.find(x => x.id === id); if (c) { Object.assign(c, patch); LS.set("cash", l); } };
+  const rerender = () => { renderCash(); renderHome(lastEtfData, !etfLoadedOnce); };
+  $$("[data-cash-label]", card).forEach(i => i.addEventListener("change", () => { save(i.dataset.cashLabel, { label: i.value.trim() || "현금" }); rerender(); }));
+  $$("[data-cash-bal]", card).forEach(i => i.addEventListener("change", () => { const v = parseFloat(i.value); save(i.dataset.cashBal, { balance: isFinite(v) ? v : 0 }); rerender(); }));
+  $$("[data-cash-owner]", card).forEach(s => s.addEventListener("change", () => { save(s.dataset.cashOwner, { owner: s.value }); rerender(); }));
+  $$("[data-cash-apy]", card).forEach(i => i.addEventListener("change", () => { const v = parseFloat(i.value); save(i.dataset.cashApy, { apy: isFinite(v) ? v : 0 }); rerender(); }));
+  $$("[data-cash-del]", card).forEach(b => b.addEventListener("click", () => { LS.set("cash", cashList().filter(x => x.id !== b.dataset.cashDel)); rerender(); }));
+  $("#cashAdd").addEventListener("click", () => { const l = cashList(); l.push({ id: uid(), label: "새 계좌", balance: 0, owner: "personal", apy: 0 }); LS.set("cash", l); rerender(); });
+}
 function homeFxRate() {
   if (fxRate) return fxRate;
   const c = LS.get("fxLast", null);
@@ -1535,7 +1571,7 @@ function computeHome(etfData, owner = "all") {
   const incBySym = {}; inc.sources.forEach(s => { incBySym[s.label] = s.annual; });
   let divAnnual = 0;
   const byAcct = {}; // 계좌별 내역(필터와 무관하게 전체)
-  const bump = (key, field, v) => { const k = key || "none"; byAcct[k] = byAcct[k] || { etf: 0, muni: 0, gov: 0, mmf: 0 }; byAcct[k][field] += v; };
+  const bump = (key, field, v) => { const k = key || "none"; byAcct[k] = byAcct[k] || { etf: 0, muni: 0, gov: 0, mmf: 0, cash: 0 }; byAcct[k][field] += v; };
   syms.forEach(sym => {
     const qtyTotal = parseFloat(getEtfQty(sym));
     if (!qtyTotal) return;
@@ -1572,13 +1608,20 @@ function computeHome(etfData, owner = "all") {
   const mmfAcct = mmf.acct || "chase";
   bump(mmfAcct, "mmf", mmf.balance || 0);
   const mmfValue = inOwner(mmfAcct) ? (mmf.balance || 0) : 0;
-  const total = etfValue + muniMv + govMv + mmfValue;
+  let cashValue = 0, cashAnnual = 0;
+  cashList().forEach(c => {
+    const b = c.balance || 0;
+    if (!b) return;
+    bump("cash:" + c.id, "cash", b);
+    if (owner === "all" || c.owner === owner) { cashValue += b; cashAnnual += b * (c.apy || 0) / 100; }
+  });
+  const total = etfValue + muniMv + govMv + mmfValue + cashValue;
   const muniAnnual = muni.reduce((s, h) => s + h.face * h.coupon / 100, 0);
   const govAnnual = gov.reduce((s, h) => s + h.face * h.coupon / 100, 0);
   const my = mmfYield();
   const mmfAnnual = my != null ? mmfValue * my / 100 : null;
-  Object.values(byAcct).forEach(a => { a.total = a.etf + a.muni + a.gov + a.mmf; });
-  return { owner, pos: pos.sort((a, b) => b.value - a.value), etfValue, etfCost, dayChange, pending, unclassified, muniMv, govMv, mmfValue, total, divAnnual, muniAnnual, govAnnual, mmfAnnual, mmfYieldKnown: my != null, etfFailed: inc.etfFailed, byAcct };
+  Object.values(byAcct).forEach(a => { a.cash = a.cash || 0; a.total = a.etf + a.muni + a.gov + a.mmf + a.cash; });
+  return { owner, pos: pos.sort((a, b) => b.value - a.value), etfValue, etfCost, dayChange, pending, unclassified, muniMv, govMv, mmfValue, cashValue, cashAnnual, total, divAnnual, muniAnnual, govAnnual, mmfAnnual, mmfYieldKnown: my != null, etfFailed: inc.etfFailed, byAcct };
 }
 function renderHome(etfData, loading) {
   const owner = LS.get("homeOwner", "all");
@@ -1597,12 +1640,12 @@ function renderHome(etfData, loading) {
       <div><span class="k">오늘 변동 (ETF·주식)</span><span class="v">${signed(r.dayChange, r.etfValue ? r.dayChange / (r.etfValue - r.dayChange) * 100 : null)}</span></div>
       <div><span class="k">ETF·주식 누적손익</span><span class="v">${signed(gain, gainPct)}</span></div>
       <div><span class="k">ETF·주식 평가액</span><span class="v">$${fmtInt(r.etfValue)}</span></div>
-      <div><span class="k">채권 + MMF</span><span class="v">$${fmtInt(r.muniMv + r.govMv + r.mmfValue)}</span></div>
+      <div><span class="k">채권 · MMF · 현금</span><span class="v">$${fmtInt(r.muniMv + r.govMv + r.mmfValue + r.cashValue)}</span></div>
     </div>
     ${loading ? `<div class="small" style="margin-top:8px">ETF 시세 불러오는 중… (채권·MMF는 먼저 계산됨)</div>` : (r.pending ? `<div class="small" style="margin-top:8px;color:var(--danger)">${r.pending}개 종목 시세 조회 실패 — 총자산에서 빠져 있어요.</div>` : "")}
     ${r.unclassified ? `<div class="small" style="margin-top:8px;color:var(--danger)">계좌 구분이 없는 자산 ${r.unclassified}건은 제외됨 — ETF 탭·채권 탭에서 계좌를 지정하거나 CSV로 가져오면 반영돼요.</div>` : ""}
   `;
-  const acctRows = [...ACCOUNTS.map(a => ({ key: a.key, label: a.label, owner: acctOwner(a.key) })), { key: "none", label: "구분 없음", owner: null }]
+  const acctRows = [...ACCOUNTS.map(a => ({ key: a.key, label: a.label, owner: acctOwner(a.key) })), ...cashList().map(c => ({ key: "cash:" + c.id, label: c.label, owner: c.owner })), { key: "none", label: "구분 없음", owner: null }]
     .map(a => ({ ...a, v: r.byAcct[a.key] })).filter(a => a.v && a.v.total > 0);
   const ownerTotals = { personal: 0, llc: 0, none: 0 };
   acctRows.forEach(a => { ownerTotals[a.owner || "none"] += a.v.total; });
@@ -1615,7 +1658,7 @@ function renderHome(etfData, loading) {
     </div>
     ${acctRows.map((a, i) => `<div class="etfRow" style="grid-template-columns:1fr auto;${i === 0 ? "border-top:0;margin-top:6px" : ""}">
       <div><div class="sym">${escapeHtml(a.label)}${a.owner ? ` <span class="acctTag">${OWNER_LABEL[a.owner]}</span>` : ""}</div>
-        <div class="nm">${[a.v.etf ? `ETF·주식 $${fmtInt(a.v.etf)}` : "", a.v.muni ? `지방채 $${fmtInt(a.v.muni)}` : "", a.v.gov ? `국채 $${fmtInt(a.v.gov)}` : "", a.v.mmf ? `MMF $${fmtInt(a.v.mmf)}` : ""].filter(Boolean).join(" · ")}</div></div>
+        <div class="nm">${[a.v.etf ? `ETF·주식 $${fmtInt(a.v.etf)}` : "", a.v.muni ? `지방채 $${fmtInt(a.v.muni)}` : "", a.v.gov ? `국채 $${fmtInt(a.v.gov)}` : "", a.v.mmf ? `MMF $${fmtInt(a.v.mmf)}` : "", a.v.cash ? `현금 $${fmtInt(a.v.cash)}` : ""].filter(Boolean).join(" · ")}</div></div>
       <div class="px" style="text-align:right">$${fmtInt(a.v.total)}<div class="small">${grand ? fmt(a.v.total / grand * 100, 1) : "-"}%</div></div>
     </div>`).join("")}
     ${ownerTotals.none ? `<div class="small" style="margin-top:8px">"구분 없음" $${fmtInt(ownerTotals.none)}은 어느 계좌인지 아직 지정 안 된 자산이에요. ETF 탭 종목의 계좌 선택칸, 채권 탭 종목의 계좌 선택칸, 또는 CSV 가져오기로 지정할 수 있어요.</div>` : ""}
@@ -1624,14 +1667,15 @@ function renderHome(etfData, loading) {
     { label: "ETF·주식", v: r.etfValue, c: "var(--accent)" },
     { label: "지방채", v: r.muniMv, c: "#7FB4F2" },
     { label: "국채", v: r.govMv, c: "#C9A227" },
-    { label: "MMF(현금성)", v: r.mmfValue, c: "#9AA7A1" }
+    { label: "MMF(현금성)", v: r.mmfValue, c: "#9AA7A1" },
+    { label: "현금(체킹)", v: r.cashValue, c: "#6FBF9A" }
   ].filter(p => p.v > 0);
   $("#homeAlloc").innerHTML = `
     <h2><span class="lbl">자산 배분</span></h2>
     <div class="allocBar">${parts.map(p => `<i style="width:${(p.v / r.total * 100).toFixed(2)}%;background:${p.c}"></i>`).join("")}</div>
     <div class="allocLegend">${parts.map(p => `<span><b style="background:${p.c}"></b>${p.label}<span class="v">${fmt(p.v / r.total * 100, 1)}% · $${fmtInt(p.v)}</span></span>`).join("")}</div>
   `;
-  const incTotal = r.divAnnual + r.muniAnnual + r.govAnnual + (r.mmfAnnual || 0);
+  const incTotal = r.divAnnual + r.muniAnnual + r.govAnnual + (r.mmfAnnual || 0) + (r.cashAnnual || 0);
   $("#homeIncome").innerHTML = `
     <h2><span class="lbl">연간 예상 수입 (세전)</span></h2>
     <div class="homeBig" style="font-size:26px;color:var(--accent)">$${fmtInt(incTotal)}<span class="small" style="margin-left:6px;color:var(--muted)">/년</span></div>
@@ -1641,6 +1685,7 @@ function renderHome(etfData, loading) {
       <div><span class="k">지방채 이자 (비과세)</span><span class="v">$${fmtInt(r.muniAnnual)}</span></div>
       <div><span class="k">국채 이자</span><span class="v">$${fmtInt(r.govAnnual)}</span></div>
       <div><span class="k">MMF 이자</span><span class="v">${r.mmfAnnual != null ? "$" + fmtInt(r.mmfAnnual) : "수익률 필요"}</span></div>
+      ${r.cashAnnual ? `<div><span class="k">현금 이자</span><span class="v">$${fmtInt(r.cashAnnual)}</span></div>` : ""}
     </div>
     ${!r.mmfYieldKnown ? `<div class="small" style="margin-top:6px">MMF 수익률이 아직 없어 MMF 이자는 빠져 있어요 (채권 탭에서 자동 조회 또는 입력).</div>` : ""}
   `;
