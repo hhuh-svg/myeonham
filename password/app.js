@@ -8,6 +8,21 @@ const CLIP_CLEAR_MS = 30000;
 
 let key = null, entries = [], filter = "전체", favOnly = false, lockTimer = null, hiddenAt = 0, lastCopy = null;
 
+// 브라우저 공유 메뉴 → "비밀번호 금고"로 들어온 주소/제목 (manifest share_target)
+const pendingShare = (() => {
+  const p = new URLSearchParams(location.search);
+  if (!p.has("url") && !p.has("text") && !p.has("title")) return null;
+  history.replaceState(null, "", location.pathname);
+  const raw = p.get("url") || (p.get("text") || "").match(/https?:\/\/\S+/)?.[0] || "";
+  return raw ? sharePreset(raw, p.get("title") || "") : null;
+})();
+function sharePreset(raw, title) {
+  let url = raw.trim();
+  try { const u = new URL(href(url)); url = u.origin + (u.pathname === "/" ? "" : u.pathname); } catch {}
+  const site = (title || "").replace(/\s+/g, " ").trim().slice(0, 40) || host(url).split(".")[0];
+  return { url, site };
+}
+
 /* ---------- 공통 ---------- */
 function toast(t, ms = 2000) { const el = $("#toast"); el.textContent = t; el.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => el.hidden = true, ms); }
 async function copy(t, label = "복사했어요", sensitive = false) {
@@ -37,6 +52,7 @@ const ICON = {
   dice: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="4" width="16" height="16" rx="3"/><circle cx="9" cy="9" r="1" fill="currentColor"/><circle cx="15" cy="15" r="1" fill="currentColor"/><circle cx="15" cy="9" r="1" fill="currentColor"/><circle cx="9" cy="15" r="1" fill="currentColor"/></svg>',
   link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>',
   lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
+  paste: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3h6v1M9 11h6M9 15h4"/></svg>',
 };
 
 /* ---------- 비밀번호 강도 / 생성 ---------- */
@@ -129,6 +145,7 @@ async function showLock() {
         if (!key) { stat(`<div class="status err">마스터 비밀번호가 맞지 않아요.</div>`); $("#mpw").select(); return; }
       }
       el.hidden = true; el.innerHTML = ""; await reload(); armLock();
+      if (pendingShare && !showLock.shared) { showLock.shared = true; openEditor(null, pendingShare); }
     } finally { go.disabled = false; }
   };
   setTimeout(() => $("#mpw")?.focus(), 50);
@@ -217,9 +234,9 @@ function openDetail(id) {
 }
 
 /* ---------- 편집 ---------- */
-function openEditor(id) {
+function openEditor(id, preset) {
   const c = id ? entries.find(x => x.id === id) : null;
-  const d = c ? { ...c } : { site: "", url: "", username: "", password: "", note: "", category: "기타", favorite: false };
+  const d = c ? { ...c } : { site: "", url: "", username: "", password: "", note: "", category: "기타", favorite: false, ...preset };
   const el = $("#editor"); el.hidden = false; el.scrollTop = 0;
   const go = { length: 16, upper: true, lower: true, digit: true, symbol: true, noAmbig: true };
   el.innerHTML = `<div class="wrap">
@@ -227,7 +244,8 @@ function openEditor(id) {
     <div class="body">
       <form id="ef" autocomplete="off">
         <div class="f"><label>사이트·서비스 이름</label><input id="f_site" value="${esc(d.site)}" placeholder="예: 네이버, 국민은행" required></div>
-        <div class="f"><label>주소 (URL)</label><input id="f_url" value="${esc(d.url)}" placeholder="예: naver.com" inputmode="url"></div>
+        <div class="f"><label>주소 (URL)</label><div class="pw"><input id="f_url" value="${esc(d.url)}" placeholder="예: naver.com" inputmode="url" style="font-family:inherit"><button type="button" class="x" data-paste aria-label="클립보드에서 붙여넣기" title="붙여넣기">${ICON.paste}</button></div>
+          ${c ? "" : `<div class="hint" style="margin-top:4px">팁: 사이트에서 브라우저 <b>공유</b> → <b>비밀번호 금고</b>를 고르면 주소와 이름이 자동으로 채워져요.</div>`}</div>
         <div class="f"><label>아이디 · 이메일</label><input id="f_user" value="${esc(d.username)}" autocomplete="off" autocapitalize="off"></div>
         <div class="f"><label>비밀번호</label><div class="pw"><input id="f_pw" type="password" value="${esc(d.password)}" autocomplete="new-password" autocapitalize="off"><button type="button" class="x" data-eye="f_pw" aria-label="보기">${ICON.eye}</button><button type="button" class="x" data-gen aria-label="생성기">${ICON.dice}</button></div>${meterHTML(d.password)}</div>
         <div class="gen" id="gen" hidden>
@@ -256,6 +274,13 @@ function openEditor(id) {
     const t = e.target.closest("button"); if (!t) return;
     if (t.hasAttribute("data-close")) { el.hidden = true; el.innerHTML = ""; }
     else if (t.hasAttribute("data-eye")) toggleEye(t);
+    else if (t.hasAttribute("data-paste")) {
+      navigator.clipboard.readText().then(txt => {
+        const u = (txt || "").match(/https?:\/\/\S+|[\w-]+(\.[\w-]+)+\S*/)?.[0];
+        if (!u) return toast("클립보드에 주소가 없어요");
+        const p = sharePreset(u, ""); $("#f_url").value = p.url; if (!$("#f_site").value) $("#f_site").value = p.site;
+      }).catch(() => toast("클립보드를 읽을 수 없어요. 길게 눌러 붙여넣기 해 주세요"));
+    }
     else if (t.hasAttribute("data-gen")) { const g = $("#gen"); g.hidden = !g.hidden; if (!g.hidden && !$("#genOut").textContent) regen(); }
     else if (t.hasAttribute("data-regen")) regen();
     else if (t.hasAttribute("data-use")) { const p = $("#f_pw"); p.value = $("#genOut").textContent; p.type = "text"; $('[data-eye="f_pw"]').innerHTML = ICON.eyeoff; updateMeter(p.value); $("#gen").hidden = true; }
