@@ -144,6 +144,8 @@ form{display:flex;flex-direction:column;gap:12px}
 .pick{position:relative;overflow:hidden}
 .pick input{position:absolute;inset:0;opacity:0;cursor:pointer}
 .kv{display:flex;justify-content:space-between;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:10px 12px}
+.selbar{position:fixed;left:0;right:0;bottom:0;z-index:8;background:var(--surface);border-top:1px solid var(--line);padding:10px max(16px,env(safe-area-inset-left,0px)) calc(10px + env(safe-area-inset-bottom,0px));display:flex;gap:8px;align-items:center}
+.item.picked{border-color:var(--accent);background:var(--accent-soft)}
 .kv select{border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:6px 8px}
 </style>
 </head>
@@ -160,6 +162,7 @@ form{display:flex;flex-direction:column;gap:12px}
   <main><div class="list" id="list"></div><div id="emptyBox"></div></main>
 </div>
 <button class="fab" id="fab" aria-label="항목 추가"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>추가</button>
+<div class="selbar" id="selbar" hidden></div>
 <div class="lock" id="lock"></div>
 <div class="sheet" id="detail" hidden></div>
 <div class="sheet" id="editor" hidden></div>
