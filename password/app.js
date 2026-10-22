@@ -224,7 +224,7 @@ function render() {
     ...CATS.filter(c => counts[c]).map(c => `<button class="chip" data-cat="${c}" aria-pressed="${filter === c && !favOnly}">${c}<b>${counts[c]}</b></button>`),
     ...(entries.length ? [`<button class="chip" data-select aria-pressed="${selecting}">선택 삭제</button>`] : [])].join("");
   let list = entries.filter(e => (favOnly ? e.favorite : (filter === "전체" || (e.category || "기타") === filter)) &&
-    (!q || [e.site, e.url, e.username, e.note, e.category].some(v => (v || "").toLowerCase().includes(q))));
+    (!q || [e.site, e.owner, e.url, e.username, e.note, e.category].some(v => (v || "").toLowerCase().includes(q))));
   list = sorted(list);
   $("#count").textContent = entries.length ? `${list.length}/${entries.length}` : "";
   visibleIds = list.map(e => e.id); renderSelBar();
@@ -234,7 +234,7 @@ function render() {
     if (e.password && st.score <= 1) tags.push(`<span class="tag bad">${esc(st.label)}</span>`);
     return `<div class="item${selecting && selected.has(e.id) ? " picked" : ""}" role="button" tabindex="0" data-open="${e.id}">${avatar(e)}
       <div class="meta"><div class="n">${e.favorite ? '<span class="star">★</span>' : ""}<span>${esc(e.site || host(e.url) || "(이름 없음)")}</span></div>
-      <div class="c">${esc(e.username || host(e.url) || "")}</div><div>${tags.join("")}</div></div>
+      <div class="c">${e.owner ? `<b style="color:var(--ink)">${esc(e.owner)}</b> · ` : ""}${esc(e.username || host(e.url) || "")}</div><div>${tags.join("")}</div></div>
       <div class="quick">${selecting ? `<div class="qbtn" style="font-weight:700;${selected.has(e.id) ? "background:var(--accent);color:var(--bg);border-color:var(--accent)" : ""}">${selected.has(e.id) ? "✓" : ""}</div>` : `<button class="qbtn" data-copypw="${e.id}" aria-label="비밀번호 복사" title="비밀번호 복사">${ICON.copy}</button>`}</div></div>`;
   }).join("");
   $("#emptyBox").innerHTML = entries.length ? (list.length ? "" : `<div class="empty">검색 결과가 없어요</div>`) :
@@ -248,8 +248,8 @@ function renderSelBar() {
   bar.hidden = false; bar.style.flexWrap = "wrap";
   const n = selected.size, all = n && visibleIds.every(id => selected.has(id)), B = 'class="btn" style="flex:none;min-width:70px;height:40px"';
   if (delAsk) bar.innerHTML = `<span style="flex:1;font-size:14px"><b>${n}개를 삭제할까요?</b> 되돌릴 수 없어요.</span><button ${B} data-selcancel>아니오</button><button class="btn danger" style="flex:none;min-width:70px;height:40px" data-seldel>삭제</button>`;
-  else if (prefAsk) bar.innerHTML = `<div style="flex:1 1 100%;font-size:13px">선택한 ${n}개의 사이트 이름 앞에 붙일 말 (예: 렌트홈 → "렌트홈 · 허한권")</div><input id="prefInput" value="렌트홈" style="flex:1;min-width:0;height:40px;border:1px solid var(--line);border-radius:10px;background:var(--bg);padding:0 12px"><button ${B} data-selcancel>취소</button><button class="btn primary" style="flex:none;min-width:70px;height:40px" data-prefgo>적용</button>`;
-  else bar.innerHTML = `<button ${B} data-selall>${all ? "선택 해제" : "전체 선택"}</button><span style="flex:1;text-align:center;font-size:14px">${n}개 선택</span><button ${B} data-selexit>닫기</button><div style="flex:1 1 100%;display:flex;gap:8px"><button class="btn" data-selpref ${n ? "" : "disabled"} style="height:40px">이름 앞에 붙이기</button><button class="btn danger" data-selgo ${n ? "" : "disabled"} style="height:40px">삭제</button></div>`;
+  else if (prefAsk) bar.innerHTML = `<div style="flex:1 1 100%;font-size:13px">선택한 ${n}개의 <b>사이트 이름</b>을 바꾸고, 지금 이름(예: 허한권)은 <b>계정 주인</b>으로 옮겨요</div><input id="prefInput" value="렌트홈" style="flex:1;min-width:0;height:40px;border:1px solid var(--line);border-radius:10px;background:var(--bg);padding:0 12px"><button ${B} data-selcancel>취소</button><button class="btn primary" style="flex:none;min-width:70px;height:40px" data-prefgo>적용</button>`;
+  else bar.innerHTML = `<button ${B} data-selall>${all ? "선택 해제" : "전체 선택"}</button><span style="flex:1;text-align:center;font-size:14px">${n}개 선택</span><button ${B} data-selexit>닫기</button><div style="flex:1 1 100%;display:flex;gap:8px"><button class="btn" data-selpref ${n ? "" : "disabled"} style="height:40px">사이트·주인 바꾸기</button><button class="btn danger" data-selgo ${n ? "" : "disabled"} style="height:40px">삭제</button></div>`;
 }
 $("#selbar").onclick = async e => {
   const t = e.target.closest("button"); if (!t || t.disabled) return;
@@ -262,11 +262,12 @@ $("#selbar").onclick = async e => {
     const p = $("#prefInput").value.trim(); if (!p) return toast("붙일 말을 입력해 주세요");
     let n = 0;
     for (const id of selected) {
-      const en = entries.find(x => x.id === id); if (!en || en.site.startsWith(p + " ")) continue;
-      en.site = `${p} · ${en.site}`; if (!en.url) en.url = guessUrl(en.site); en.updatedAt = Date.now();
+      const en = entries.find(x => x.id === id); if (!en || en.site === p) continue;
+      if (!en.owner) en.owner = en.site;
+      en.site = p; if (!en.url) en.url = guessUrl(p); en.updatedAt = Date.now();
       await Vault.save(key, en); n++;
     }
-    selecting = false; selected.clear(); prefAsk = false; await reload(); toast(`${n}개 이름을 바꿨어요`);
+    selecting = false; selected.clear(); prefAsk = false; await reload(); toast(`${n}개를 '${p}'로 바꾸고 이름은 계정 주인으로 옮겼어요`, 3000);
   }
   else if (t.hasAttribute("data-seldel")) { const n = selected.size; for (const id of selected) await Vault.remove(id); selecting = false; selected.clear(); delAsk = false; await reload(); toast(`${n}개 삭제했어요`); }
 };
@@ -294,6 +295,7 @@ function openDetail(id) {
       ${reused || st.score <= 1 ? `<div class="status warn">${reused ? "다른 사이트와 같은 비밀번호를 쓰고 있어요. " : ""}${st.score <= 1 ? "비밀번호가 약해요. " : ""}바꾸는 걸 권해요.</div>` : ""}
       <div class="rows">
         ${u ? `<div class="row"><div><div class="k">사이트</div><a class="v" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(c.url)}</a></div><div class="acts"><button class="qbtn" data-copy="${esc(c.url)}" aria-label="주소 복사">${ICON.copy}</button></div></div>` : ""}
+        ${c.owner ? `<div class="row"><div><div class="k">계정 주인</div><div class="v">${esc(c.owner)}</div></div><div></div></div>` : ""}
         <div class="row"><div><div class="k">아이디</div><div class="v num">${esc(c.username || "—")}</div></div><div class="acts">${c.username ? `<button class="qbtn" data-copy="${esc(c.username)}" aria-label="아이디 복사">${ICON.copy}</button>` : ""}</div></div>
         <div class="row"><div><div class="k">비밀번호 <span class="small">· ${esc(st.label)}</span></div><div class="v num" id="pwv">${c.password ? "••••••••••" : "—"}</div></div>
           <div class="acts">${c.password ? `<button class="qbtn" data-reveal aria-label="보기">${ICON.eye}</button><button class="qbtn" data-copypw aria-label="비밀번호 복사">${ICON.copy}</button>` : ""}</div></div>
@@ -332,6 +334,7 @@ function openEditor(id, preset) {
         <div class="f"><label>사이트·서비스 이름</label><input id="f_site" value="${esc(d.site)}" placeholder="예: 네이버, 국민은행" required></div>
         <div class="f"><label>주소 (URL)</label><div class="pw"><input id="f_url" value="${esc(d.url)}" placeholder="예: naver.com" inputmode="url" style="font-family:inherit"><button type="button" class="x" data-paste aria-label="클립보드에서 붙여넣기" title="붙여넣기">${ICON.paste}</button></div>
           ${c ? "" : `<div class="hint" style="margin-top:4px">팁: 사이트에서 브라우저 <b>공유</b> → <b>비밀번호 금고</b>를 고르면 주소와 이름이 자동으로 채워져요.</div>`}</div>
+        <div class="f"><label>계정 주인 (가족 이름 등, 선택)</label><input id="f_owner" list="ownerList" value="${esc(d.owner || "")}" placeholder="예: 허한권" autocomplete="off"><datalist id="ownerList">${[...new Set(entries.map(x => x.owner).filter(Boolean))].map(o => `<option value="${esc(o)}">`).join("")}</datalist></div>
         <div class="f"><label>아이디 · 이메일</label><input id="f_user" value="${esc(d.username)}" autocomplete="off" autocapitalize="off"></div>
         <div class="f"><label>비밀번호</label><div class="pw"><input id="f_pw" type="password" value="${esc(d.password)}" autocomplete="new-password" autocapitalize="off"><button type="button" class="x" data-eye="f_pw" aria-label="보기">${ICON.eye}</button><button type="button" class="x" data-gen aria-label="생성기">${ICON.dice}</button></div>${meterHTML(d.password)}</div>
         <div class="gen" id="gen" hidden>
@@ -378,7 +381,7 @@ function openEditor(id, preset) {
   };
   $("#ef").onsubmit = async e => {
     e.preventDefault();
-    const body = { id: d.id || uid(), site: $("#f_site").value.trim(), url: $("#f_url").value.trim() || guessUrl($("#f_site").value), username: $("#f_user").value.trim(), password: $("#f_pw").value,
+    const body = { id: d.id || uid(), owner: $("#f_owner").value.trim(), site: $("#f_site").value.trim(), url: $("#f_url").value.trim() || guessUrl($("#f_site").value), username: $("#f_user").value.trim(), password: $("#f_pw").value,
       note: $("#f_note").value.trim(), category: $("#f_cat").value, favorite: $("#f_fav").value === "1", createdAt: d.createdAt || Date.now(), updatedAt: Date.now(), lastUsed: d.lastUsed || 0 };
     if (!body.site) { $("#eStat").innerHTML = `<div class="status err">사이트 이름을 입력해 주세요.</div>`; return; }
     try { await Vault.save(key, body); el.hidden = true; el.innerHTML = ""; await reload(); if (!$("#detail").hidden) openDetail(body.id); toast("저장했어요"); }
