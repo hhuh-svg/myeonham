@@ -100,8 +100,8 @@ async function mapWithConcurrency(items, limit, fn) {
 // =========================================================
 // 탭 전환
 // =========================================================
-const PANES = ["fx", "etf", "muni", "income", "news"];
-const TITLES = { fx: "환율", etf: "ETF 시세", muni: "채권", income: "배당·이자 현황", news: "뉴스" };
+const PANES = ["home", "fx", "etf", "muni", "income", "news"];
+const TITLES = { home: "내 자산", fx: "환율", etf: "ETF 시세", muni: "채권", income: "배당·이자 현황", news: "뉴스" };
 function showTab(tab) {
   PANES.forEach(p => { $("#pane-" + p).hidden = p !== tab; });
   $$('.tabs button').forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
@@ -111,6 +111,7 @@ function showTab(tab) {
   if (tab === "etf" && !etfLoadedOnce) loadEtf();
   if (tab === "muni" && !benchLoadedFor.muni) loadMuniBench();
   if (tab === "income") loadIncome(); // 수량·채권이 다른 탭에서 바뀔 수 있어 볼 때마다 다시 계산(조회는 재사용)
+  if (tab === "home") loadHome();
   if (tab === "news" && !newsLoadedOnce) loadNews();
 }
 $$('.tabs button').forEach(b => b.addEventListener("click", () => showTab(b.dataset.tab)));
@@ -1346,6 +1347,176 @@ async function loadIncome(force) {
 }
 
 // =========================================================
+// 0) 내 자산 요약: 유명 자산관리 앱(Empower·Kubera·Robinhood 등)이 맨 앞에 두는 화면.
+//    총자산(원화 환산)·오늘 변동·누적손익·자산 배분·연간 예상 수입·상위 비중·오늘 등락 + 백업/복원.
+//    전부 다른 탭이 이미 가진 데이터로 계산(추가 조회 없음).
+// =========================================================
+const paneHome = $("#pane-home");
+function homeSkeleton() {
+  paneHome.innerHTML = `
+    <div class="card" id="homeTotal"><h2><span class="lbl">총자산 (평가액 기준, 세전)</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="card" id="homeAlloc"><h2><span class="lbl">자산 배분</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="card" id="homeIncome"><h2><span class="lbl">연간 예상 수입</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="card" id="homeTop"><h2><span class="lbl">상위 비중 종목</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="card" id="homeMovers"><h2><span class="lbl">오늘 등락</span></h2><div class="status">불러오는 중…</div></div>
+    <div class="card">
+      <h2><span class="lbl">데이터 백업 · 복원</span></h2>
+      <div class="small">보유수량·채권·MMF·설정은 이 기기 브라우저에만 저장됩니다. 폰을 바꾸거나 브라우저 데이터를 지우면 사라지니 가끔 백업 파일을 받아두세요.</div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn sm" id="backupBtn">백업 파일 저장</button>
+        <button class="btn sm" id="restoreBtn">복원</button>
+        <input type="file" id="restoreFile" accept="application/json,.json" hidden>
+      </div>
+    </div>
+    <div class="row"><button class="btn sm" id="homeRefresh">새로고침</button></div>
+    <p class="disclaim">시세는 15~20분 지연일 수 있고 채권 가격은 직접 입력한 값 기준입니다. 참고용이며 투자 조언이 아닙니다.</p>
+  `;
+  $("#homeRefresh").addEventListener("click", () => loadHome(true));
+  $("#backupBtn").addEventListener("click", backupData);
+  $("#restoreBtn").addEventListener("click", () => $("#restoreFile").click());
+  $("#restoreFile").addEventListener("change", restoreData);
+}
+function backupData() {
+  const out = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith("findash.")) out[k] = localStorage.getItem(k);
+  }
+  const blob = new Blob([JSON.stringify({ app: "findash", at: new Date().toISOString(), data: out }, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `findash-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  toast("백업 파일을 저장했어요");
+}
+function restoreData(e) {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const j = JSON.parse(reader.result);
+      if (!j || j.app !== "findash" || !j.data) throw new Error("형식");
+      if (!confirm(`${(j.at || "").slice(0, 10)} 백업으로 덮어쓸까요? 지금 저장된 수량·채권·설정이 교체됩니다.`)) return;
+      Object.entries(j.data).forEach(([k, v]) => { if (k.startsWith("findash.")) localStorage.setItem(k, v); });
+      toast("복원했어요 — 다시 불러옵니다");
+      setTimeout(() => location.reload(), 600);
+    } catch { toast("백업 파일이 아니에요"); }
+  };
+  reader.readAsText(f);
+  e.target.value = "";
+}
+function homeFxRate() {
+  if (fxRate) return fxRate;
+  const c = LS.get("fxLast", null);
+  return c && c.rate ? c.rate : null;
+}
+function computeHome(etfData) {
+  const syms = LS.get("etfSymbols", DEFAULT_ETFS);
+  const pos = [];
+  let etfValue = 0, etfCost = 0, dayChange = 0, pending = 0;
+  syms.forEach(sym => {
+    const qty = parseFloat(getEtfQty(sym));
+    if (!qty) return;
+    const d = etfData[sym];
+    if (!d || d.error) { pending++; return; }
+    const value = qty * d.price;
+    const cost = parseFloat(getEtfCost(sym));
+    etfValue += value;
+    if (isFinite(cost)) etfCost += qty * cost;
+    const prev = d.pct != null ? d.price / (1 + d.pct / 100) : null;
+    const chg = prev != null ? qty * (d.price - prev) : null;
+    if (chg != null) dayChange += chg;
+    pos.push({ sym, name: d.name || "", qty, price: d.price, value, pct: d.pct, chg, gain: isFinite(cost) ? value - qty * cost : null, gainPct: isFinite(cost) && cost ? (d.price - cost) / cost * 100 : null });
+  });
+  const muni = muniBonds.load(), gov = govBonds.load();
+  const muniMv = muni.reduce((s, h) => s + h.face * h.price / 100, 0);
+  const govMv = gov.reduce((s, h) => s + h.face * h.price / 100, 0);
+  const muniFace = muni.reduce((s, h) => s + h.face, 0);
+  const govFace = gov.reduce((s, h) => s + h.face, 0);
+  const mmf = mmfGet();
+  const mmfValue = mmf.balance || 0;
+  const total = etfValue + muniMv + govMv + mmfValue;
+  const inc = computeIncome(etfData);
+  const divAnnual = inc.sources.reduce((s, x) => s + x.annual, 0);
+  const muniAnnual = muni.reduce((s, h) => s + h.face * h.coupon / 100, 0);
+  const govAnnual = gov.reduce((s, h) => s + h.face * h.coupon / 100, 0);
+  const my = mmfYield();
+  const mmfAnnual = my != null ? mmfValue * my / 100 : null;
+  return { pos: pos.sort((a, b) => b.value - a.value), etfValue, etfCost, dayChange, pending, muniMv, govMv, muniFace, govFace, mmfValue, total, divAnnual, muniAnnual, govAnnual, mmfAnnual, mmfYieldKnown: my != null, etfFailed: inc.etfFailed };
+}
+function renderHome(etfData, loading) {
+  const r = computeHome(etfData);
+  const fx = homeFxRate();
+  const krw = v => fx ? `₩${fmtInt(v * fx)}` : "환율 없음";
+  const gain = r.etfCost ? r.etfValue - r.etfCost : null;
+  const gainPct = r.etfCost ? gain / r.etfCost * 100 : null;
+  const signed = (v, pct) => v == null ? "—" : `<span style="color:${v >= 0 ? "var(--up)" : "var(--down)"}">${v >= 0 ? "+" : "-"}$${fmtInt(Math.abs(v))}${pct != null ? ` (${v >= 0 ? "+" : "-"}${fmt(Math.abs(pct))}%)` : ""}</span>`;
+  $("#homeTotal").innerHTML = `
+    <h2><span class="lbl">총자산 (평가액 기준, 세전)</span></h2>
+    <div class="homeBig">$${fmtInt(r.total)}</div>
+    <div class="homeSub">${krw(r.total)}${fx ? ` · 1 USD = ₩${fmt(fx)}` : " · 환율 탭에서 환율을 불러오면 원화로도 표시"}</div>
+    <div class="kpi">
+      <div><span class="k">오늘 변동 (ETF·주식)</span><span class="v">${signed(r.dayChange, r.etfValue ? r.dayChange / (r.etfValue - r.dayChange) * 100 : null)}</span></div>
+      <div><span class="k">ETF·주식 누적손익</span><span class="v">${signed(gain, gainPct)}</span></div>
+      <div><span class="k">ETF·주식 평가액</span><span class="v">$${fmtInt(r.etfValue)}</span></div>
+      <div><span class="k">채권 + MMF</span><span class="v">$${fmtInt(r.muniMv + r.govMv + r.mmfValue)}</span></div>
+    </div>
+    ${loading ? `<div class="small" style="margin-top:8px">ETF 시세 불러오는 중… (채권·MMF는 먼저 계산됨)</div>` : (r.pending ? `<div class="small" style="margin-top:8px;color:var(--danger)">${r.pending}개 종목 시세 조회 실패 — 총자산에서 빠져 있어요.</div>` : "")}
+  `;
+  const parts = [
+    { label: "ETF·주식", v: r.etfValue, c: "var(--accent)" },
+    { label: "지방채", v: r.muniMv, c: "#7FB4F2" },
+    { label: "국채", v: r.govMv, c: "#C9A227" },
+    { label: "MMF(현금성)", v: r.mmfValue, c: "#9AA7A1" }
+  ].filter(p => p.v > 0);
+  $("#homeAlloc").innerHTML = `
+    <h2><span class="lbl">자산 배분</span></h2>
+    <div class="allocBar">${parts.map(p => `<i style="width:${(p.v / r.total * 100).toFixed(2)}%;background:${p.c}"></i>`).join("")}</div>
+    <div class="allocLegend">${parts.map(p => `<span><b style="background:${p.c}"></b>${p.label}<span class="v">${fmt(p.v / r.total * 100, 1)}% · $${fmtInt(p.v)}</span></span>`).join("")}</div>
+  `;
+  const incTotal = r.divAnnual + r.muniAnnual + r.govAnnual + (r.mmfAnnual || 0);
+  $("#homeIncome").innerHTML = `
+    <h2><span class="lbl">연간 예상 수입 (세전)</span></h2>
+    <div class="homeBig" style="font-size:26px;color:var(--accent)">$${fmtInt(incTotal)}<span class="small" style="margin-left:6px;color:var(--muted)">/년</span></div>
+    <div class="homeSub">월 $${fmtInt(incTotal / 12)} · 총자산 대비 ${r.total ? fmt(incTotal / r.total * 100) : "-"}%${fx ? ` · ${krw(incTotal)}/년` : ""}</div>
+    <div class="kpi">
+      <div><span class="k">ETF·주식 배당</span><span class="v">$${fmtInt(r.divAnnual)}</span></div>
+      <div><span class="k">지방채 이자 (비과세)</span><span class="v">$${fmtInt(r.muniAnnual)}</span></div>
+      <div><span class="k">국채 이자</span><span class="v">$${fmtInt(r.govAnnual)}</span></div>
+      <div><span class="k">MMF 이자</span><span class="v">${r.mmfAnnual != null ? "$" + fmtInt(r.mmfAnnual) : "수익률 필요"}</span></div>
+    </div>
+    ${!r.mmfYieldKnown ? `<div class="small" style="margin-top:6px">MMF 수익률이 아직 없어 MMF 이자는 빠져 있어요 (채권 탭에서 자동 조회 또는 입력).</div>` : ""}
+  `;
+  const top = r.pos.slice(0, 5);
+  const top5Share = r.total ? top.reduce((s, p) => s + p.value, 0) / r.total * 100 : 0;
+  $("#homeTop").innerHTML = `
+    <h2><span class="lbl">상위 비중 종목</span></h2>
+    ${top.length ? top.map((p, i) => `<div class="etfRow" style="grid-template-columns:1fr auto;${i === 0 ? "border-top:0" : ""}">
+      <div><div class="sym">${escapeHtml(p.sym)} <span class="small" style="font-weight:400">${fmt(p.value / r.total * 100, 1)}%</span></div><div class="nm">${escapeHtml(p.name)}</div></div>
+      <div class="px" style="text-align:right">$${fmtInt(p.value)}<div class="small">${p.gain != null ? signed(p.gain, p.gainPct) : ""}</div></div>
+    </div>`).join("") : `<div class="small">${loading ? "불러오는 중…" : "보유수량이 입력된 종목이 없습니다."}</div>`}
+    ${top.length ? `<div class="small" style="margin-top:8px">상위 5종목이 총자산의 ${fmt(top5Share, 1)}%${top5Share >= 50 ? " — 특정 종목 쏠림이 큰 편이에요" : ""}</div>` : ""}
+  `;
+  const movers = r.pos.filter(p => p.pct != null).sort((a, b) => b.pct - a.pct);
+  const up = movers.filter(p => p.pct > 0).slice(0, 3);
+  const down = movers.filter(p => p.pct < 0).slice(-3).reverse();
+  const moverRow = p => `<div class="etfRow" style="grid-template-columns:1fr auto auto"><div class="sym">${escapeHtml(p.sym)}</div><div class="px">$${fmt(p.price)}</div>${pctCell(p.pct)}<div class="nm" style="grid-column:1/4">${p.chg != null ? `오늘 ${signed(p.chg)}` : ""}</div></div>`;
+  $("#homeMovers").innerHTML = `
+    <h2><span class="lbl">오늘 등락 (보유 종목)</span></h2>
+    ${movers.length ? `<div class="small">상승</div>${up.length ? up.map(moverRow).join("") : `<div class="small" style="color:var(--muted)">오른 종목 없음</div>`}<div class="small" style="margin-top:8px">하락</div>${down.length ? down.map(moverRow).join("") : `<div class="small" style="color:var(--muted)">내린 종목 없음</div>`}` : `<div class="small">${loading ? "불러오는 중…" : "표시할 종목이 없습니다."}</div>`}
+  `;
+}
+async function loadHome(force) {
+  if (!etfLoadedOnce || force) renderHome(lastEtfData, true);
+  try { await (force ? loadEtf() : ensureEtfLoaded()); } catch {}
+  if (!fxRate && !fxLoaded) { try { await loadFx(); } catch {} } // 원화 환산용
+  renderHome(lastEtfData, false);
+  setUpdated(nowLabel() + " 업데이트");
+}
+
+// =========================================================
 // 6) 주요 뉴스 피드 (RSS, CORS 프록시 경유)
 // =========================================================
 const NEWS_FEEDS = [
@@ -1459,9 +1630,9 @@ async function loadNews(force) {
 // =========================================================
 // 초기화
 // =========================================================
-fxSkeleton(); etfSkeleton(); muniSkeleton(); incomeSkeleton(); newsSkeleton();
-const lastTab = LS.get("lastTab", "fx");
-showTab(PANES.includes(lastTab) ? lastTab : "fx"); // 없어진 탭(cd)이 저장돼 있을 수 있음
+homeSkeleton(); fxSkeleton(); etfSkeleton(); muniSkeleton(); incomeSkeleton(); newsSkeleton();
+const lastTab = LS.get("lastTab", "home");
+showTab(PANES.includes(lastTab) ? lastTab : "home"); // 없어진 탭(cd)이 저장돼 있을 수 있음
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));

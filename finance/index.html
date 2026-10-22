@@ -152,7 +152,18 @@ table.logtbl td.del{text-align:right}
 .status.err{color:var(--danger)}
 
 nav.tabs{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--surface);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom,0px)}
-nav.tabs .inner{max-width:640px;margin:0 auto;display:grid;grid-template-columns:repeat(5,1fr)}
+nav.tabs .inner{max-width:640px;margin:0 auto;display:grid;grid-template-columns:repeat(6,1fr)}
+.allocBar{display:flex;height:12px;border-radius:6px;overflow:hidden;margin:10px 0 8px;background:var(--line)}
+.allocBar i{display:block;height:100%}
+.allocLegend{display:grid;grid-template-columns:1fr;gap:5px;font-size:12.5px}
+.allocLegend span{display:flex;align-items:center;gap:6px}
+.allocLegend b{display:inline-block;width:10px;height:10px;border-radius:3px;flex:none}
+.allocLegend .v{margin-left:auto;font-family:var(--font-mono);color:var(--muted)}
+.kpi{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;margin-top:10px}
+.kpi .k{display:block;font-size:11px;color:var(--muted)}
+.kpi .v{font-family:var(--font-mono);font-weight:600;font-size:15px}
+.homeBig{font-family:var(--font-mono);font-size:32px;font-weight:700;letter-spacing:-.5px}
+.homeSub{font-size:13px;color:var(--muted);margin-top:2px}
 nav.tabs button{background:none;border:0;display:flex;flex-direction:column;align-items:center;gap:3px;padding:9px 2px 8px;color:var(--muted);font-size:11.5px;font-weight:600}
 nav.tabs button svg{width:21px;height:21px}
 nav.tabs button[aria-selected="true"]{color:var(--accent)}
@@ -168,6 +179,7 @@ nav.tabs button[aria-selected="true"]{color:var(--accent)}
     </div>
   </header>
   <main>
+    <section class="pane" id="pane-home" hidden></section>
     <section class="pane" id="pane-fx"></section>
     <section class="pane" id="pane-etf" hidden></section>
     <section class="pane" id="pane-muni" hidden></section>
@@ -177,6 +189,10 @@ nav.tabs button[aria-selected="true"]{color:var(--accent)}
 </div>
 <nav class="tabs" role="tablist" aria-label="섹션">
   <div class="inner">
+    <button role="tab" data-tab="home" aria-selected="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/></svg>
+      자산
+    </button>
     <button role="tab" data-tab="fx" aria-selected="true">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 15l4-4 3 3 5-6"/><path d="M4 4v16h16"/></svg>
       환율
