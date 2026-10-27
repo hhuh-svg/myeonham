@@ -443,10 +443,11 @@ function renderIndexRows(data) {
   box.innerHTML = INDEX_TICKERS.map(({ sym, label }, i) => {
     const d = data[sym];
     const base = `style="grid-template-columns:1fr auto auto;${i === 0 ? "border-top:0" : ""}"`;
-    if (!d) return `<div class="etfRow" ${base}><div class="sym">${label}</div><div class="px">…</div><div></div></div>`;
-    if (d.error) return `<div class="etfRow" ${base}><div class="sym">${label}</div><div class="err">조회 실패</div><div></div></div>`;
+    const lb = `<button class="symBtn" data-chart="${escapeHtml(sym)}" data-label="${escapeHtml(label)}">${label}</button>`;
+    if (!d) return `<div class="etfRow" ${base}><div class="sym">${lb}</div><div class="px">…</div><div></div></div>`;
+    if (d.error) return `<div class="etfRow" ${base}><div class="sym">${lb}</div><div class="err">조회 실패</div><div></div></div>`;
     return `<div class="etfRow" ${base}>
-      <div class="sym">${label}</div>
+      <div class="sym">${lb}</div>
       <div class="px">${fmt(d.price)}</div>
       ${pctCell(d.pct)}
     </div>`;
@@ -586,8 +587,8 @@ function renderEtfRows(syms, data) {
       <input class="qtyInput" data-cost="${s}" type="number" step="any" inputmode="decimal" placeholder="매수단가" value="${cost}">
       ${acctCell}
     </div>`;
-    if (!d) return `<div class="etfRow" data-sym="${s}"><div class="sym">${s}</div><div class="px">…</div><div></div>${qtyRow}</div>`;
-    if (d.error) return `<div class="etfRow" data-sym="${s}"><div class="sym">${s}</div><div class="err">조회 실패</div><button class="delbtn" data-del="${s}">삭제</button>${qtyRow}</div>`;
+    if (!d) return `<div class="etfRow" data-sym="${s}"><div class="sym"><button class="symBtn" data-chart="${s}">${s}</button></div><div class="px">…</div><div></div>${qtyRow}</div>`;
+    if (d.error) return `<div class="etfRow" data-sym="${s}"><div class="sym"><button class="symBtn" data-chart="${s}">${s}</button></div><div class="err">조회 실패</div><button class="delbtn" data-del="${s}">삭제</button>${qtyRow}</div>`;
     const parts = [];
     if (qty) parts.push(`평가액 $${fmtInt(qty * d.price)}`);
     if (qty && cost) {
@@ -599,7 +600,7 @@ function renderEtfRows(syms, data) {
     if (qty && d.div && d.div.rate != null) parts.push(`연배당 예상 $${fmtInt(qty * d.div.rate)}`);
     if (d.divHistory && d.divHistory.length) parts.push(`최근 배당 ${d.divHistory[0].date} $${fmt(d.divHistory[0].amount, 3)}/주`);
     return `<div class="etfRow" data-sym="${s}">
-      <div class="sym">${s}<button class="delbtn" data-del="${s}" style="margin-left:6px">삭제</button></div>
+      <div class="sym"><button class="symBtn" data-chart="${s}">${s}</button><button class="delbtn" data-del="${s}" style="margin-left:6px">삭제</button></div>
       <div class="px">$${fmt(d.price)}</div>
       ${pctCell(d.pct)}
       <div class="info">
@@ -632,6 +633,7 @@ function renderEtfRows(syms, data) {
   $$("[data-acct-clear]", box).forEach(b => b.addEventListener("click", () => { etfByAcctSet(b.dataset.acctClear, null); renderEtfRows(LS.get("etfSymbols", DEFAULT_ETFS), lastEtfData); }));
 }
 let lastEtfData = {};
+let lastIndexData = {};
 // ETF는 심볼 여러 개를 동시에 조회하므로 query1/query2를 둘 다 쏘면 호스트당 연결 수가
 // 두 배로 늘어 다른 요청이 줄서는 문제가 재발함 — 여기선 직접호출 1개 + 실패 시 프록시 2개만 race
 function yahooUrls(symbol) {
@@ -781,6 +783,7 @@ async function loadEtfInner() {
   renderIndexRows({});
   const data = {};
   const idata = {};
+  lastIndexData = idata;
   lastEtfData = data;
   etfSource = ""; renderEtfSource();
   // Yahoo가 아예 막힌 환경에서 26개를 하나씩 10초씩 실패시키지 않도록 첫 종목 하나로 먼저 탐침하고,
@@ -838,6 +841,153 @@ async function loadEtfInner() {
 }
 
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+// ---------- 종목 가격 추이 차트(티커를 누르면 아래에서 올라오는 시트) ----------
+// CNBC 시세 API는 현재가만 주므로 과거 시세는 별도 경로: CNBC 차트 API · Stooq 일별 CSV · Yahoo chart를 동시에 시도해 먼저 오는 쪽 사용.
+const CHART_PERIODS = [["1m", "1개월", 31], ["6m", "6개월", 183], ["1y", "1년", 366], ["5y", "5년", 1830]];
+const chartCache = {};
+function yyyymmdd(d) { return d.toISOString().slice(0, 10).replace(/-/g, ""); }
+function cleanSeries(t, c, days, src) {
+  const cutoff = Date.now() - days * 86400000;
+  const pts = t.map((x, i) => [x, c[i]]).filter(([x, v]) => isFinite(x) && isFinite(v) && v > 0 && x >= cutoff).sort((a, b) => a[0] - b[0]);
+  if (pts.length < 2) throw new Error(src + ": 데이터 부족");
+  return { t: pts.map(p => p[0]), c: pts.map(p => p[1]), src };
+}
+async function historyCnbc(sym, period, days) {
+  const r = { "1m": "1M", "6m": "6M", "1y": "1Y", "5y": "5Y" }[period];
+  const target = `https://ts-api.cnbc.com/harmony/app/charts/${r}.json?symbol=${encodeURIComponent(CNBC_MAP[sym] || sym)}`;
+  const json = await fetchFirstOk([[target], corsProxies(target)], 8000);
+  const bars = (json && json.barData && json.barData.priceBars) || [];
+  const t = bars.map(b => {
+    const ms = Number(b.tradeTimeinMills);
+    if (isFinite(ms) && ms > 0) return ms;
+    const m = String(b.tradeTime || "").match(/^(\d{4})(\d{2})(\d{2})/);
+    return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : NaN;
+  });
+  return cleanSeries(t, bars.map(b => parseFloat(b.close)), days, "CNBC");
+}
+async function historyStooq(sym, period, days) {
+  const s = STOOQ_MAP[sym] || (sym.toLowerCase() + ".us");
+  const now = new Date();
+  const target = `https://stooq.com/q/d/l/?s=${encodeURIComponent(s)}&d1=${yyyymmdd(new Date(now - days * 86400000))}&d2=${yyyymmdd(now)}&i=${period === "5y" ? "w" : "d"}`;
+  const csv = await fetchFirstOkText([corsProxies(target)], 8000);
+  if (!/^\s*Date,/i.test(csv)) throw new Error("Stooq: 응답 형식 오류");
+  const rows = csv.trim().split(/\r?\n/).slice(1).map(l => l.split(","));
+  return cleanSeries(rows.map(r => Date.parse(r[0] + "T00:00:00Z")), rows.map(r => parseFloat(r[4])), days, "Stooq");
+}
+async function historyYahoo(sym, period, days) {
+  const range = { "1m": "1mo", "6m": "6mo", "1y": "1y", "5y": "5y" }[period];
+  const target = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=${range}&interval=${period === "5y" ? "1wk" : "1d"}`;
+  const json = await fetchFirstOk([[target], corsProxies(target)], 8000);
+  const r = json && json.chart && json.chart.result && json.chart.result[0];
+  const close = r && r.indicators && r.indicators.quote && r.indicators.quote[0] && r.indicators.quote[0].close;
+  if (!r || !r.timestamp || !close) throw new Error("Yahoo: 데이터 없음");
+  return cleanSeries(r.timestamp.map(x => x * 1000), close, days, "Yahoo");
+}
+async function fetchHistory(sym, period) {
+  const key = sym + "|" + period;
+  const hit = chartCache[key];
+  if (hit && Date.now() - hit.at < 10 * 60000) return hit.data;
+  const days = CHART_PERIODS.find(p => p[0] === period)[2];
+  const tasks = [() => historyCnbc(sym, period, days), () => historyStooq(sym, period, days)];
+  if (!yahooBlocked) tasks.push(() => historyYahoo(sym, period, days));
+  const data = await raceOk(tasks);
+  chartCache[key] = { at: Date.now(), data };
+  return data;
+}
+// ref = 매수단가(가로 점선). 차트 범위에서 너무 멀면 축을 늘리지 않고 안내만 함
+function chartSVG(values, ref) {
+  const w = 320, h = 160;
+  let min = Math.min(...values), max = Math.max(...values);
+  const span0 = (max - min) || max * 0.01 || 1;
+  const refShown = ref != null && ref >= min - span0 * 0.6 && ref <= max + span0 * 0.6;
+  if (refShown) { min = Math.min(min, ref); max = Math.max(max, ref); }
+  const pad = ((max - min) || 1) * 0.06;
+  min -= pad; max += pad;
+  const y = v => h - ((v - min) / (max - min)) * h;
+  const pts = values.map((v, i) => `${((i / (values.length - 1)) * w).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const color = values[values.length - 1] >= values[0] ? "var(--up)" : "var(--down)";
+  return {
+    refShown,
+    svg: `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      ${refShown ? `<line x1="0" x2="${w}" y1="${y(ref).toFixed(1)}" y2="${y(ref).toFixed(1)}" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="5 4" vector-effect="non-scaling-stroke"/>` : ""}
+      <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>
+      <line id="chartCursor" x1="0" x2="0" y1="0" y2="${h}" stroke="var(--muted)" stroke-width="1" vector-effect="non-scaling-stroke" visibility="hidden"/>
+    </svg>`
+  };
+}
+let chartReq = 0;
+function closeChart() { $("#chartSheet").hidden = true; chartReq++; }
+async function openChart(sym, label, period) {
+  period = period || LS.get("chartPeriod", "6m");
+  const req = ++chartReq;
+  const bg = $("#chartSheet");
+  const sheet = $(".sheet", bg);
+  const d = lastEtfData[sym] || lastIndexData[sym] || null;
+  const isIndex = !!INDEX_TICKERS.find(t => t.sym === sym);
+  const cost = isIndex ? null : parseFloat(getEtfCost(sym));
+  const qty = isIndex ? null : parseFloat(getEtfQty(sym));
+  const money = v => (isIndex ? "" : "$") + fmt(v);
+  const head = `
+    <div class="sheetHead">
+      <div><h3 id="chartTitle">${escapeHtml(label || sym)}</h3><div class="small">${escapeHtml(d && d.name ? d.name : sym)}</div></div>
+      <button class="sheetClose" id="chartClose" aria-label="닫기">×</button>
+    </div>
+    ${d && !d.error ? `<div class="fxRate" style="margin-top:8px"><span class="num" style="font-size:26px">${money(d.price)}</span>${d.pct != null ? `<span class="chg ${d.pct >= 0 ? "pos" : "neg"}">${d.pct >= 0 ? "▲" : "▼"} ${fmt(Math.abs(d.pct))}% 오늘</span>` : ""}</div>` : ""}
+    <div class="segrow" id="chartPeriods">${CHART_PERIODS.map(([k, l]) => `<button class="seg" data-p="${k}" aria-pressed="${k === period}">${l}</button>`).join("")}</div>`;
+  sheet.innerHTML = head + `<div class="status" style="margin-top:14px">차트 불러오는 중…</div>`;
+  bg.hidden = false;
+  const bind = () => {
+    $("#chartClose").addEventListener("click", closeChart);
+    $$("#chartPeriods .seg").forEach(b => b.addEventListener("click", () => { LS.set("chartPeriod", b.dataset.p); openChart(sym, label, b.dataset.p); }));
+  };
+  bind();
+  let hist;
+  try { hist = await fetchHistory(sym, period); }
+  catch (e) {
+    if (req !== chartReq) return;
+    sheet.innerHTML = head + `<div class="status err" style="margin-top:14px">가격 추이를 가져오지 못했어요.</div><div class="small" style="margin-top:6px;word-break:break-all">${escapeHtml(e.message)}</div>`;
+    bind();
+    return;
+  }
+  if (req !== chartReq) return;
+  const c = hist.c;
+  const first = c[0], last = c[c.length - 1];
+  const chg = (last - first) / first * 100;
+  const hi = Math.max(...c), lo = Math.min(...c);
+  const ref = isFinite(cost) && cost > 0 ? cost : null;
+  const nowPx = d && !d.error ? d.price : last; // 매수단가 비교는 차트 마지막 종가가 아니라 현재 시세 기준
+  const ch = chartSVG(c, ref);
+  const dateOf = ms => fmtDateShort(new Date(ms).toISOString().slice(0, 10));
+  const plabel = CHART_PERIODS.find(p => p[0] === period)[1];
+  sheet.innerHTML = head + `
+    <div class="chartMeta"><span>고 ${money(hi)}</span><span class="${chg >= 0 ? "pos" : "neg"}">${plabel} ${chg >= 0 ? "▲" : "▼"} ${fmt(Math.abs(chg))}%</span><span>저 ${money(lo)}</span></div>
+    <div class="chartWrap" id="chartWrap">${ch.svg}</div>
+    <div class="chartDates"><span>${dateOf(hist.t[0])}</span><span>${dateOf(hist.t[hist.t.length - 1])}</span></div>
+    <div class="chartRead" id="chartRead">차트를 손가락으로 쓸면 날짜별 가격이 보여요</div>
+    ${ref ? `<div class="small" style="margin-top:8px"><span style="color:var(--accent)">┄ 내 매수단가 $${fmt(ref)}</span>${!ch.refShown ? ` (이 기간 가격대와 멀어서 선은 생략 — 현재가 대비 ${nowPx >= ref ? "+" : ""}${fmt((nowPx - ref) / ref * 100)}%)` : ` · 현재가 대비 ${nowPx >= ref ? "+" : ""}${fmt((nowPx - ref) / ref * 100)}%`}${qty ? ` · ${fmt(qty, 3)}주` : ""}</div>` : ""}
+    <div class="small" style="margin-top:6px;color:var(--muted)">출처: ${escapeHtml(hist.src)} · ${period === "5y" ? "주간" : "일간"} 종가</div>
+  `;
+  bind();
+  const wrap = $("#chartWrap"), read = $("#chartRead"), cur = $("#chartCursor");
+  const show = ev => {
+    const r = wrap.getBoundingClientRect();
+    const fx = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width));
+    const i = Math.round(fx * (c.length - 1));
+    const x = (i / (c.length - 1)) * 320;
+    cur.setAttribute("x1", x); cur.setAttribute("x2", x); cur.setAttribute("visibility", "visible");
+    const vs = (c[i] - first) / first * 100;
+    read.textContent = `${dateOf(hist.t[i])} · ${money(c[i])} (기간 시작 대비 ${vs >= 0 ? "+" : ""}${fmt(vs)}%)`;
+  };
+  wrap.addEventListener("pointerdown", e => { wrap.setPointerCapture(e.pointerId); show(e); });
+  wrap.addEventListener("pointermove", e => { if (e.pointerType === "mouse" || e.buttons) show(e); });
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-chart]");
+  if (b) { openChart(b.dataset.chart, b.dataset.label || b.dataset.chart); return; }
+  if (e.target.id === "chartSheet") closeChart();
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#chartSheet").hidden) closeChart(); });
 
 // =========================================================
 // 3) 미국채 벤치마크 (Yahoo Finance 지수: 3개월/5년/10년/30년) — 지방채·CD·금리 탭 공용
@@ -1764,7 +1914,7 @@ function renderHome(etfData, loading) {
   $("#homeTop").innerHTML = `
     <h2><span class="lbl">상위 비중 종목</span></h2>
     ${top.length ? top.map((p, i) => `<div class="etfRow" style="grid-template-columns:1fr auto;${i === 0 ? "border-top:0" : ""}">
-      <div><div class="sym">${escapeHtml(p.sym)} <span class="small" style="font-weight:400">${fmt(p.value / r.total * 100, 1)}%</span></div><div class="nm">${escapeHtml(p.name)}</div></div>
+      <div><div class="sym"><button class="symBtn" data-chart="${escapeHtml(p.sym)}">${escapeHtml(p.sym)}</button> <span class="small" style="font-weight:400">${fmt(p.value / r.total * 100, 1)}%</span></div><div class="nm">${escapeHtml(p.name)}</div></div>
       <div class="px" style="text-align:right">$${fmtInt(p.value)}<div class="small">${p.gain != null ? signed(p.gain, p.gainPct) : ""}</div></div>
     </div>`).join("") : `<div class="small">${loading ? "불러오는 중…" : "보유수량이 입력된 종목이 없습니다."}</div>`}
     ${top.length ? `<div class="small" style="margin-top:8px">상위 5종목이 총자산의 ${fmt(top5Share, 1)}%${top5Share >= 50 ? " — 특정 종목 쏠림이 큰 편이에요" : ""}</div>` : ""}
@@ -1772,7 +1922,7 @@ function renderHome(etfData, loading) {
   const movers = r.pos.filter(p => p.pct != null).sort((a, b) => b.pct - a.pct);
   const up = movers.filter(p => p.pct > 0).slice(0, 3);
   const down = movers.filter(p => p.pct < 0).slice(-3).reverse();
-  const moverRow = p => `<div class="etfRow" style="grid-template-columns:1fr auto auto"><div class="sym">${escapeHtml(p.sym)}</div><div class="px">$${fmt(p.price)}</div>${pctCell(p.pct)}<div class="nm" style="grid-column:1/4">${p.chg != null ? `오늘 ${signed(p.chg)}` : ""}</div></div>`;
+  const moverRow = p => `<div class="etfRow" style="grid-template-columns:1fr auto auto"><div class="sym"><button class="symBtn" data-chart="${escapeHtml(p.sym)}">${escapeHtml(p.sym)}</button></div><div class="px">$${fmt(p.price)}</div>${pctCell(p.pct)}<div class="nm" style="grid-column:1/4">${p.chg != null ? `오늘 ${signed(p.chg)}` : ""}</div></div>`;
   $("#homeMovers").innerHTML = `
     <h2><span class="lbl">오늘 등락 (보유 종목)</span></h2>
     ${movers.length ? `<div class="small">상승</div>${up.length ? up.map(moverRow).join("") : `<div class="small" style="color:var(--muted)">오른 종목 없음</div>`}<div class="small" style="margin-top:8px">하락</div>${down.length ? down.map(moverRow).join("") : `<div class="small" style="color:var(--muted)">내린 종목 없음</div>`}` : `<div class="small">${loading ? "불러오는 중…" : "표시할 종목이 없습니다."}</div>`}
