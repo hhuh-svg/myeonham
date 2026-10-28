@@ -524,6 +524,27 @@ if (LS.get("cashVersion", 0) !== CASH_VERSION) { // 버전이 오르면 없는 �
   LS.set("cash", cur); LS.set("cashVersion", CASH_VERSION);
 }
 function cashList() { return LS.get("cash", DEFAULT_CASH); }
+// ---------- "언제 기준" 표시: 시세는 실시간이지만 보유수량·잔고·채권가격은 마지막으로 입력/가져온 시점 기준 ----------
+// 키: "acct:<계좌>"(보유수량·단가), "bond:<CUSIP>"(채권 가격), "mmf", "cash:<id>". 처음 값은 사용자가 보낸 캡처 날짜로 시딩.
+const DEFAULT_ASOF = { "acct:fid_p": "2026-10-21", "acct:fid_llc": "2026-10-21", "mmf": "2026-10-22", "cash:chase_chk": "2026-10-22", "cash:rh_cash": "2026-10-22", "cash:fid_spaxx": "2026-10-22" };
+const STALE_DAYS = 7;
+function asOfGet(key) {
+  const v = (LS.get("asOf", {}) || {})[key];
+  if (v) return v;
+  const d = DEFAULT_ASOF[key];
+  return d ? new Date(d + "T12:00:00").getTime() : null;
+}
+function markAsOf(...keys) { const a = LS.get("asOf", {}) || {}; keys.filter(Boolean).forEach(k => { a[k] = Date.now(); }); LS.set("asOf", a); }
+function asOfDays(ms) { const d0 = new Date(ms); d0.setHours(0, 0, 0, 0); const d1 = new Date(); d1.setHours(0, 0, 0, 0); return Math.round((d1 - d0) / 86400000); }
+// 짧은 표시: "10.21 기준 · 7일 전" (STALE_DAYS 이상이면 빨간색 + 갱신 필요)
+function asOfText(ms, prefix = "") {
+  if (!ms) return `<span style="color:var(--muted)">${prefix}기준일 없음</span>`;
+  const d = new Date(ms), n = asOfDays(ms);
+  const rel = n <= 0 ? "오늘" : n === 1 ? "어제" : n + "일 전";
+  const stale = n >= STALE_DAYS;
+  return `<span style="color:${stale ? "var(--danger)" : "var(--muted)"}">${prefix}${d.getMonth() + 1}.${d.getDate()} 기준 · ${rel}${stale ? " · 갱신 필요" : ""}</span>`;
+}
+function acctAsOfKey(key) { return key === "chase" ? "mmf" : key && key.startsWith("cash:") ? key : key && key !== "none" ? "acct:" + key : null; }
 function acctOwner(key) {
   if (key && key.startsWith("cash:")) { const c = cashList().find(x => "cash:" + x.id === key); return c ? c.owner : null; }
   const a = ACCOUNTS.find(x => x.key === key); if (!a) return null; return a.owner || LS.get("chaseOwner", "personal");
@@ -614,11 +635,13 @@ function renderEtfRows(syms, data) {
   $$("[data-del]", box).forEach(b => b.addEventListener("click", () => removeEtfSymbol(b.dataset.del)));
   $$("[data-qty]", box).forEach(inp => inp.addEventListener("change", () => {
     setEtfQty(inp.dataset.qty, inp.value);
+    markAsOf(...Object.keys(etfByAcctGet(inp.dataset.qty) || {}).map(k => "acct:" + k));
     syncEtfSplitAfterManual(inp.dataset.qty);
     renderEtfRows(LS.get("etfSymbols", DEFAULT_ETFS), lastEtfData);
   }));
   $$("[data-cost]", box).forEach(inp => inp.addEventListener("change", () => {
     setEtfCost(inp.dataset.cost, inp.value);
+    markAsOf(...Object.keys(etfByAcctGet(inp.dataset.cost) || {}).map(k => "acct:" + k));
     syncEtfSplitAfterManual(inp.dataset.cost);
     renderEtfRows(LS.get("etfSymbols", DEFAULT_ETFS), lastEtfData);
   }));
@@ -626,7 +649,7 @@ function renderEtfRows(syms, data) {
     const sym = sel.dataset.acct;
     const q = parseFloat(getEtfQty(sym)) || 0;
     const c = parseFloat(getEtfCost(sym));
-    if (sel.value && q > 0) etfByAcctSet(sym, { [sel.value]: { qty: q, costTotal: isFinite(c) ? c * q : null } });
+    if (sel.value && q > 0) { etfByAcctSet(sym, { [sel.value]: { qty: q, costTotal: isFinite(c) ? c * q : null } }); markAsOf("acct:" + sel.value); }
     else { etfByAcctSet(sym, null); if (sel.value && !q) toast("보유수량을 먼저 입력해주세요"); }
     renderEtfRows(LS.get("etfSymbols", DEFAULT_ETFS), lastEtfData);
   }));
@@ -775,7 +798,14 @@ async function fetchQuotesFallback(symbols) {
 }
 let yahooBlocked = false;
 let etfSource = "";
-function renderEtfSource() { const el = $("#etfSourceNote"); if (el) el.textContent = etfSource ? "시세 출처: " + etfSource : ""; }
+function renderEtfSource() {
+  const el = $("#etfSourceNote");
+  if (!el) return;
+  const used = new Set();
+  Object.values(etfByAcctAll()).forEach(m => Object.keys(m).forEach(k => used.add(k)));
+  const asof = ACCOUNTS.filter(a => used.has(a.key)).map(a => `${a.label} ${asOfText(asOfGet("acct:" + a.key))}`).join("<br>");
+  el.innerHTML = (etfSource ? `시세: 실시간 (${escapeHtml(etfSource)})` : "") + (asof ? `<div style="margin-top:4px">보유수량·매수단가:<br>${asof}</div>` : "");
+}
 async function loadEtfInner() {
   etfLoadedOnce = true;
   const syms = LS.get("etfSymbols", DEFAULT_ETFS);
@@ -1130,7 +1160,7 @@ function renderBondHoldings(boxId, ctrl, emptyLabel) {
           <div><span class="k">평가액</span><span class="v">$${fmtInt(h.mv)}</span></div>
         </div>
         <div class="bondFoot">
-          <span class="small">액면 $${fmtInt(h.face)} · 가격</span>
+          <span class="small">액면 $${fmtInt(h.face)} · 가격 ${asOfText(asOfGet("bond:" + h.cusip) || asOfGet("acct:" + h.acct))}</span>
           <input class="qtyInput" data-price="${escapeHtml(h.cusip)}" type="number" step="0.001" value="${h.price}">
           <select class="acctSel" data-acct-bond="${escapeHtml(h.cusip)}" title="계좌">${acctOptions(h.acct || "")}</select>
           <button class="delbtn" data-del="${escapeHtml(h.cusip)}" style="margin-left:auto">삭제</button>
@@ -1139,7 +1169,7 @@ function renderBondHoldings(boxId, ctrl, emptyLabel) {
     `).join("")}
     <p class="note">쿠폰 지급일은 만기 월·일 기준 6개월 간격 지급을 가정한 추정값입니다(실제와 다를 수 있음). 이자 = 액면가 × 쿠폰금리(세전). 가격은 자동조회가 안 돼서 직접 확인해 가끔 업데이트해주세요.</p>
   `;
-  $$("[data-price]", box).forEach(inp => inp.addEventListener("change", () => { ctrl.setPrice(inp.dataset.price, inp.value); renderBondHoldings(boxId, ctrl, emptyLabel); }));
+  $$("[data-price]", box).forEach(inp => inp.addEventListener("change", () => { ctrl.setPrice(inp.dataset.price, inp.value); markAsOf("bond:" + inp.dataset.price); renderBondHoldings(boxId, ctrl, emptyLabel); }));
   $$("[data-del]", box).forEach(b => b.addEventListener("click", () => { ctrl.delete(b.dataset.del); renderBondHoldings(boxId, ctrl, emptyLabel); }));
   $$("[data-acct-bond]", box).forEach(sel => sel.addEventListener("change", () => ctrl.set(sel.dataset.acctBond, { acct: sel.value || null })));
   renderBondIncome();
@@ -1193,6 +1223,7 @@ function renderMmf() {
   card.innerHTML = `
     <h2><span class="lbl">머니마켓펀드 (MMF)</span></h2>
     <div class="bondName">${escapeHtml(m.ticker)} <span class="small" style="font-weight:400">${escapeHtml(m.name)}</span></div>
+    <div class="small">잔액 ${asOfText(asOfGet("mmf"))}</div>
     <div class="bondStats">
       <div><span class="k">월 이자 예상</span><span class="v hl">${monthly != null ? "$" + fmtInt(monthly) : "—"}</span></div>
       <div><span class="k">연 이자 예상</span><span class="v hl">${monthly != null ? "$" + fmtInt(monthly * 12) : "—"}</span></div>
@@ -1207,7 +1238,7 @@ function renderMmf() {
       ? (mmfAutoErr ? `수익률 자동 조회 실패 (${escapeHtml(mmfAutoErr)}) — 피델리티 MMF 화면의 7-day yield를 입력해주세요.` : "수익률 자동 조회 중…")
       : (manual ? "직접 입력한 수익률 기준." : `자동 조회한 수익률(${escapeHtml(mmfAutoSrc || "자동")}) ${fmt(mmfAutoYield)}% 기준 — 직접 입력하면 그 값을 우선.`)} 이자는 매일 쌓여 월말에 지급된다고 가정. 지방채 MMF라 연방세 면제.</p>
   `;
-  $("#mmfBalance").addEventListener("change", e => { const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { LS.set("mmf", { ...mmfGet(), balance: v }); renderMmf(); renderBondIncome(); } });
+  $("#mmfBalance").addEventListener("change", e => { const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { LS.set("mmf", { ...mmfGet(), balance: v }); markAsOf("mmf"); renderMmf(); renderBondIncome(); } });
   $("#mmfYield").addEventListener("change", e => { const v = parseFloat(e.target.value); LS.set("mmf", { ...mmfGet(), yield: isFinite(v) && v > 0 ? v : null }); renderMmf(); renderBondIncome(); });
   $("#mmfAcct").addEventListener("change", e => { LS.set("mmf", { ...mmfGet(), acct: e.target.value || null }); renderMmf(); });
   const co = $("#chaseOwner");
@@ -1764,6 +1795,7 @@ function renderCash() {
       <input class="qtyInput" data-cash-apy="${escapeHtml(c.id)}" type="number" step="0.01" inputmode="decimal" value="${c.apy || ""}" placeholder="${c.ticker && cashApy(c) != null ? "자동 " + fmt(cashApy(c)) + "%" : "이자 %(선택)"}" style="flex:0 1 92px;min-width:0" title="연 이자율(선택)">
       ${c.ticker ? `<span class="small" style="flex-basis:100%;margin-top:-4px">${escapeHtml(c.ticker)} · ${cashApy(c) != null ? (c.apy > 0 ? "직접 입력 " + fmt(c.apy) + "%" : `7일 수익률 자동 ${fmt(cashApy(c))}%${cashAutoYield[c.ticker] ? " (" + escapeHtml(cashAutoYield[c.ticker].src) + ")" : ""}`) : "7일 수익률 조회 중… (안 되면 직접 입력)"}</span>` : ""}
       <button class="delbtn" data-cash-del="${escapeHtml(c.id)}">삭제</button>
+      <span class="small" style="flex-basis:100%;margin-top:-4px">잔고 ${asOfText(asOfGet("cash:" + c.id))}</span>
     </div>`).join("")}
     <div class="row"><button class="btn sm" id="cashAdd">+ 현금 계좌 추가</button></div>
     <p class="note">잔고는 직접 입력(은행 앱 잔고). 총자산·자산 배분·계좌별 자산에 합산되고, 이자율을 적으면 연간 수입에도 들어갑니다.</p>
@@ -1771,7 +1803,7 @@ function renderCash() {
   const save = (id, patch) => { const l = cashList(); const c = l.find(x => x.id === id); if (c) { Object.assign(c, patch); LS.set("cash", l); } };
   const rerender = () => { renderCash(); renderHome(lastEtfData, !etfLoadedOnce); };
   $$("[data-cash-label]", card).forEach(i => i.addEventListener("change", () => { save(i.dataset.cashLabel, { label: i.value.trim() || "현금" }); rerender(); }));
-  $$("[data-cash-bal]", card).forEach(i => i.addEventListener("change", () => { const v = parseFloat(i.value); save(i.dataset.cashBal, { balance: isFinite(v) ? v : 0 }); rerender(); }));
+  $$("[data-cash-bal]", card).forEach(i => i.addEventListener("change", () => { const v = parseFloat(i.value); save(i.dataset.cashBal, { balance: isFinite(v) ? v : 0 }); markAsOf("cash:" + i.dataset.cashBal); rerender(); }));
   $$("[data-cash-owner]", card).forEach(s => s.addEventListener("change", () => { save(s.dataset.cashOwner, { owner: s.value }); rerender(); }));
   $$("[data-cash-apy]", card).forEach(i => i.addEventListener("change", () => { const v = parseFloat(i.value); save(i.dataset.cashApy, { apy: isFinite(v) ? v : 0 }); rerender(); }));
   $$("[data-cash-del]", card).forEach(b => b.addEventListener("click", () => { LS.set("cash", cashList().filter(x => x.id !== b.dataset.cashDel)); rerender(); }));
@@ -1843,6 +1875,15 @@ function computeHome(etfData, owner = "all") {
   Object.values(byAcct).forEach(a => { a.cash = a.cash || 0; a.total = a.etf + a.muni + a.gov + a.mmf + a.cash; });
   return { owner, pos: pos.sort((a, b) => b.value - a.value), etfValue, etfCost, dayChange, pending, unclassified, muniMv, govMv, mmfValue, cashValue, cashAnnual, total, divAnnual, muniAnnual, govAnnual, mmfAnnual, mmfYieldKnown: my != null, etfFailed: inc.etfFailed, byAcct };
 }
+// 총자산 아래 한 줄: 시세는 실시간, 보유·잔고는 가장 오래된 기준일 + 갱신 필요한 계좌 수
+function homeAsOfLine(r) {
+  const keys = Object.entries(r.byAcct).filter(([, v]) => v.total > 0).map(([k]) => acctAsOfKey(k)).filter(Boolean);
+  const times = [...new Set(keys)].map(k => asOfGet(k)).filter(Boolean);
+  if (!times.length) return "";
+  const oldest = Math.min(...times);
+  const stale = times.filter(t => asOfDays(t) >= STALE_DAYS).length;
+  return `시세는 실시간 · 보유·잔고는 계좌별 입력 기준 (가장 오래된 것 ${asOfText(oldest)})${stale ? ` <span style="color:var(--danger)">— ${stale}개 계좌 갱신 필요</span>` : ""}`;
+}
 function renderHome(etfData, loading) {
   const owner = LS.get("homeOwner", "all");
   const r = computeHome(etfData, owner);
@@ -1856,6 +1897,7 @@ function renderHome(etfData, loading) {
     <h2><span class="lbl">총자산 (평가액 기준, 세전)</span>${ownerTag}</h2>
     <div class="homeBig">$${fmtInt(r.total)}</div>
     <div class="homeSub">${krw(r.total)}${fx ? ` · 1 USD = ₩${fmt(fx)}` : " · 환율 탭에서 환율을 불러오면 원화로도 표시"}</div>
+    <div class="small" style="margin-top:4px">${homeAsOfLine(r)}</div>
     <div class="kpi">
       <div><span class="k">오늘 변동 (ETF·주식)</span><span class="v">${signed(r.dayChange, r.etfValue ? r.dayChange / (r.etfValue - r.dayChange) * 100 : null)}</span></div>
       <div><span class="k">ETF·주식 누적손익</span><span class="v">${signed(gain, gainPct)}</span></div>
@@ -1878,6 +1920,7 @@ function renderHome(etfData, loading) {
     </div>
     ${acctRows.map((a, i) => `<div class="etfRow" style="grid-template-columns:1fr auto;${i === 0 ? "border-top:0;margin-top:6px" : ""}">
       <div><div class="sym">${escapeHtml(a.label)}${a.owner ? ` <span class="acctTag">${OWNER_LABEL[a.owner]}</span>` : ""}</div>
+        ${acctAsOfKey(a.key) ? `<div class="small">${asOfText(asOfGet(acctAsOfKey(a.key)))}</div>` : ""}
         <div class="nm">${[a.v.etf ? `ETF·주식 $${fmtInt(a.v.etf)}` : "", a.v.muni ? `지방채 $${fmtInt(a.v.muni)}` : "", a.v.gov ? `국채 $${fmtInt(a.v.gov)}` : "", a.v.mmf ? `MMF $${fmtInt(a.v.mmf)}` : "", a.v.cash ? `현금 $${fmtInt(a.v.cash)}` : ""].filter(Boolean).join(" · ")}</div></div>
       <div class="px" style="text-align:right">$${fmtInt(a.v.total)}<div class="small">${grand ? fmt(a.v.total / grand * 100, 1) : "-"}%</div></div>
     </div>`).join("")}
@@ -2089,7 +2132,7 @@ function previewFidelityCsv(text) {
       </div>` : ""}
       ${p.muni.map(h => bondLine(h, "지방채")).join("")}
       ${p.gov.map(h => bondLine(h, "국채")).join("")}
-      ${p.mmf.map(m => `<div class="small">MMF ${escapeHtml(m.ticker)} 잔액 $${fmtInt(m.balance)}${p.mmf.length > 1 ? " (가장 큰 잔액만 MMF 카드에 반영)" : ""}</div>`).join("")}
+      ${p.mmf.map(m => `<div class="small">현금(core) ${escapeHtml(m.ticker)} $${fmtInt(m.balance)}${m.acctName ? ` · ${escapeHtml(m.acctName)}` : ""} → 자산 탭 현금 계좌에 반영</div>`).join("")}
       <div class="row" style="margin-top:10px"><button class="btn sm primary" id="importApply">반영하기</button><button class="btn sm" id="importCancel">취소</button></div>
       <p class="note">CSV에 없는 기존 종목은 그대로 둡니다(판 종목은 ETF 탭에서 삭제). 피델리티 계좌분만 갱신되고 로빈후드 계좌분은 유지됩니다. 채권은 CUSIP 기준 갱신/추가, 가격은 CSV의 Last Price.</p>
     `;
@@ -2112,6 +2155,7 @@ function applyFidelityImport() {
         cur.fid_p = { qty: q, costTotal: isFinite(c) ? c * q : null };
       }
       cur.rh = { qty: e.qty, costTotal: e.costTotal };
+      markAsOf("acct:rh");
       etfByAcctSet(sym, cur);
       etfRecomputeTotals(sym);
     });
@@ -2141,11 +2185,22 @@ function applyFidelityImport() {
   LS.set("etfSymbols", syms);
   p.muni.forEach(h => { const { acctName, ...rest } = h; muniBonds.upsert({ ...rest, acct: keyOf(acctName) }); });
   p.gov.forEach(h => { const { acctName, ...rest } = h; govBonds.upsert({ ...rest, acct: keyOf(acctName) }); });
+  // 피델리티 CSV의 머니마켓(SPAXX 등)은 계좌의 core 현금 → 현금 계좌 목록에 계좌별로 반영(JPM MMF 카드는 건드리지 않음)
+  const cashIds = [];
   if (p.mmf.length) {
-    const big = p.mmf.slice().sort((a, b) => b.balance - a.balance)[0];
-    LS.set("mmf", { ...mmfGet(), ticker: big.ticker, name: big.name || big.ticker, balance: big.balance, acct: keyOf(big.acctName) || mmfGet().acct || null });
+    const list = cashList();
+    p.mmf.forEach(m => {
+      const k = keyOf(m.acctName) || "fid_p";
+      const id = k === "fid_p" && m.ticker === "SPAXX" ? "fid_spaxx" : `fidmmf_${k}_${m.ticker}`;
+      const c = list.find(x => x.id === id);
+      if (c) { c.balance = (cashIds.includes(id) ? c.balance : 0) + m.balance; }
+      else list.push({ id, label: `피델리티 ${m.ticker} (${k === "fid_llc" ? "LLC" : "개인"} core)`, ticker: m.ticker, balance: m.balance, owner: acctOwner(k) || "personal", apy: 0 });
+      if (!cashIds.includes(id)) cashIds.push(id);
+    });
+    LS.set("cash", list);
   }
   LS.set("lastImportAt", Date.now());
+  markAsOf(...[...new Set(p.accounts.map(keyOf))].map(k => k && "acct:" + k), ...p.muni.concat(p.gov).map(h => "bond:" + h.cusip), ...cashIds.map(id => "cash:" + id));
   importPending = null;
   toast(`반영했어요 — ETF·주식 ${Object.keys(p.etf).length}종목(신규 ${added}), 채권 ${p.muni.length + p.gov.length}, MMF ${p.mmf.length}. 다시 불러옵니다`);
   setTimeout(() => location.reload(), 900);
