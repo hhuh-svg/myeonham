@@ -335,73 +335,20 @@ function renderFx(card, { rate, days, history, prevRate, period }, staleNote) {
 // =========================================================
 // 2) ETF 시세 (Yahoo Finance chart API, 무키 — 실패 시 대체 경로)
 // =========================================================
-const DEFAULT_ETFS = [
-  "BST", "GLDM", "GOOGL", "IAU", "LLY", "MGK", "MSFT", "NVDA", "QQQ", "QQQM",
-  "SCHP", "SGOV", "SMH", "SUB", "TSLA", "VOO", "VTES", "VXUS",
-  "ARKG", "BOTZ", "CQQQ", "IXN", "MCHI", "SIVR", "SPCX", "XOVR"
-];
-// 기본 종목 목록을 실제 보유 종목으로 교체(2026-10-19) — 이미 저장된 사용자 데이터를 한 번만 덮어씀
+// 개인 보유 데이터(수량·단가·계좌)는 코드에 넣지 않음 — 공개 저장소라 누구나 볼 수 있음. 모든 보유 정보는 기기의 localStorage에만 저장되고
+// CSV 가져오기·직접 입력·백업 파일 복원으로 채움. 아래 기본 목록은 처음 설치 시 보여줄 일반 예시 종목일 뿐.
+const DEFAULT_ETFS = ["VOO", "QQQ", "SCHD", "VTI", "VXUS", "BND"];
+// 버전 플래그는 유지: 이미 데이터가 있는 기기에서는 아래 블록이 실행되지 않아 기존 데이터가 그대로 남음
 const ETF_DEFAULTS_VERSION = 2;
 if (LS.get("etfDefaultsVersion", 1) !== ETF_DEFAULTS_VERSION) {
   LS.set("etfSymbols", DEFAULT_ETFS);
   LS.set("etfDefaultsVersion", ETF_DEFAULTS_VERSION);
 }
-// 피델리티 포지션 화면(Qty/Avg. Cost)에서 받은 실제 보유수량·매수단가 시딩(2026-10-21)
-// 계좌 2개에 겹치는 종목은 수량 합산 + 총매입금액 기준 가중평균단가로 합쳐 하나의 보유현황으로 표시.
-const DEFAULT_ETF_QTY = {
-  BST: 345.107, GLDM: 800, GOOGL: 165.65, IAU: 660.171, LLY: 35.199, MGK: 418.066,
-  MSFT: 240.118, NVDA: 460.166, QQQ: 50.61, QQQM: 308.296, SCHP: 2000, SGOV: 3000,
-  SMH: 150.546, SUB: 308, TSLA: 324.174, VOO: 129.637, VTES: 700, VXUS: 310,
-  ARKG: 610, BOTZ: 223, CQQQ: 346, IXN: 93, MCHI: 937, SIVR: 375, SPCX: 132, XOVR: 646
-};
-const DEFAULT_ETF_COST = {
-  BST: 48.60, GLDM: 86.08, GOOGL: 329.62, IAU: 82.66, LLY: 1116.20, MGK: 92.16,
-  MSFT: 478.42, NVDA: 196.72, QQQ: 720.56, QQQM: 304.79, SCHP: 25.71, SGOV: 100.61,
-  SMH: 597.18, SUB: 104.58, TSLA: 392.58, VOO: 707.02, VTES: 98.59, VXUS: 87.13,
-  ARKG: 32.88, BOTZ: 37.60, CQQQ: 52.04, IXN: 139.49, MCHI: 62.45, SIVR: 73.23, SPCX: 176.86, XOVR: 20.14
-};
 const ETF_POSITIONS_VERSION = 2;
 if (LS.get("etfPositionsVersion", 0) !== ETF_POSITIONS_VERSION) {
-  LS.set("etfQty", DEFAULT_ETF_QTY);
-  LS.set("etfCost", DEFAULT_ETF_COST);
+  if (!LS.get("etfQty", null)) LS.set("etfQty", {});
+  if (!LS.get("etfCost", null)) LS.set("etfCost", {});
   LS.set("etfPositionsVersion", ETF_POSITIONS_VERSION);
-}
-// 계좌별 분리(2026-10-22): 사용자 확인 — 첫 캡처(JOINT WROS, 지방채 6종 포함)가 피델리티 개인, 두 번째 캡처가 LLC.
-// 합치기 전 계좌별 수량·매입금액을 복원(개인 = 첫 시딩값, LLC = 합산값 − 개인). 국채 3종은 LLC.
-const DEFAULT_ETF_BY_ACCT = {
-  BST: { fid_p: { qty: 178.107, costTotal: 8759.3 }, fid_llc: { qty: 167.0, costTotal: 8012.9 } },
-  GLDM: { fid_p: { qty: 800, costTotal: 68864.0 } },
-  GOOGL: { fid_p: { qty: 24.65, costTotal: 8610.98 }, fid_llc: { qty: 141.0, costTotal: 45990.57 } },
-  IAU: { fid_p: { qty: 79.171, costTotal: 6419.18 }, fid_llc: { qty: 581.0, costTotal: 48150.55 } },
-  LLY: { fid_p: { qty: 4.199, costTotal: 4894.14 }, fid_llc: { qty: 31.0, costTotal: 34394.98 } },
-  MGK: { fid_p: { qty: 418.066, costTotal: 38528.96 } },
-  MSFT: { fid_p: { qty: 18.118, costTotal: 9361.93 }, fid_llc: { qty: 222.0, costTotal: 105515.32 } },
-  NVDA: { fid_p: { qty: 95.166, costTotal: 21832.98 }, fid_llc: { qty: 365.0, costTotal: 68690.87 } },
-  QQQ: { fid_p: { qty: 25.61, costTotal: 18545.99 }, fid_llc: { qty: 25.0, costTotal: 17921.55 } },
-  QQQM: { fid_p: { qty: 308.296, costTotal: 93965.54 } },
-  SCHP: { fid_p: { qty: 2000, costTotal: 51420.0 } },
-  SGOV: { fid_p: { qty: 3000, costTotal: 301830.0 } },
-  SMH: { fid_p: { qty: 130.546, costTotal: 78274.08 }, fid_llc: { qty: 20.0, costTotal: 11628.98 } },
-  SUB: { fid_p: { qty: 308, costTotal: 32210.64 } },
-  TSLA: { fid_p: { qty: 98.174, costTotal: 36024.95 }, fid_llc: { qty: 226.0, costTotal: 91239.28 } },
-  VOO: { fid_p: { qty: 109.637, costTotal: 77728.25 }, fid_llc: { qty: 20.0, costTotal: 13927.7 } },
-  VTES: { fid_p: { qty: 700, costTotal: 69013.0 } },
-  VXUS: { fid_p: { qty: 310, costTotal: 27010.3 } },
-  ARKG: { fid_llc: { qty: 610, costTotal: 20056.8 } },
-  BOTZ: { fid_llc: { qty: 223, costTotal: 8384.8 } },
-  CQQQ: { fid_llc: { qty: 346, costTotal: 18005.84 } },
-  IXN: { fid_llc: { qty: 93, costTotal: 12972.57 } },
-  MCHI: { fid_llc: { qty: 937, costTotal: 58515.65 } },
-  SIVR: { fid_llc: { qty: 375, costTotal: 27461.25 } },
-  SPCX: { fid_llc: { qty: 132, costTotal: 23345.52 } },
-  XOVR: { fid_llc: { qty: 646, costTotal: 13010.44 } }
-};
-const ETF_BYACCT_VERSION = 1;
-if (LS.get("etfByAcctVersion", 0) !== ETF_BYACCT_VERSION) { // 이미 계좌가 지정된 종목은 건드리지 않음
-  const all = LS.get("etfByAcct", {}) || {};
-  Object.entries(DEFAULT_ETF_BY_ACCT).forEach(([sym, m]) => { if (!all[sym]) all[sym] = m; });
-  LS.set("etfByAcct", all);
-  LS.set("etfByAcctVersion", ETF_BYACCT_VERSION);
 }
 const INDEX_TICKERS = [{ sym: "^GSPC", label: "S&P 500" }, { sym: "^IXIC", label: "나스닥" }];
 let etfLoadedOnce = false;
@@ -497,13 +444,8 @@ const ACCOUNTS = [
 ];
 const OWNER_LABEL = { personal: "개인", llc: "LLC" };
 // 현금 계좌(체이스 체킹 등): 자산 탭 카드에서 잔고·소유를 직접 입력. key는 "cash:<id>"
-// 체이스 체킹(…1908) 잔고는 사용자 캡처(2026-10-22, Available balance) 기준으로 시딩 — 이후엔 자산 탭에서 직접 갱신
-const DEFAULT_CASH = [
-  { id: "chase_chk", label: "체이스 체킹 (…1908)", balance: 1245141.74, owner: "personal", apy: 0 },
-  { id: "rh_cash", label: "로빈후드 현금", balance: 5000, owner: "personal", apy: 0 }, // 사용자: "로빈후드 현금 5000 상태"(2026-10-22)
-  // 피델리티 개인(JOINT WROS) Balances 캡처(2026-10-22): Cash & Credits $1,885,535.04 = core position SPAXX(정부 MMF)
-  { id: "fid_spaxx", label: "피델리티 SPAXX (개인 core)", ticker: "SPAXX", balance: 1885535.04, owner: "personal", apy: 0 }
-];
+// 처음 설치 시 기본 행 하나만(잔고 0). 실제 잔고는 기기에만 저장.
+const DEFAULT_CASH = [{ id: "cash1", label: "체킹 계좌", balance: 0, owner: "personal", apy: 0 }];
 const CASH_VERSION = 3;
 // 티커가 있는 현금성 계좌(SPAXX 등)는 MMF와 같은 방식으로 7일 수익률을 자동 조회(직접 입력한 이자율이 우선)
 const cashAutoYield = LS.get("cashYieldAuto", {}) || {};
@@ -520,7 +462,7 @@ async function loadCashYields() {
 }
 if (LS.get("cashVersion", 0) !== CASH_VERSION) { // 버전이 오르면 없는 계좌만 추가(사용자가 고친 잔고는 유지)
   const cur = LS.get("cash", null) || [];
-  DEFAULT_CASH.forEach(d => { if (!cur.some(c => c.id === d.id)) cur.push({ ...d }); });
+  if (!cur.length) DEFAULT_CASH.forEach(d => cur.push({ ...d }));
   LS.set("cash", cur); LS.set("cashVersion", CASH_VERSION);
 }
 function cashList() { return LS.get("cash", DEFAULT_CASH); }
@@ -1061,18 +1003,10 @@ async function loadBenchmark(force) {
 // 4) 비과세 지방채: "지금 사도 될 만한 수익률인가" 자동 기준선 계산기
 // =========================================================
 const paneMuni = $("#pane-muni");
-// 실제 보유 지방채(2026-10-19 피델리티 포지션 화면에서 받은 데이터로 시딩)
-const DEFAULT_MUNI_HOLDINGS = [
-  { cusip: "09182TGW1", name: "BLACK BELT ENERGY GAS DIST", coupon: 5.000, maturity: "2035-12-01", face: 85000, price: 100.534 },
-  { cusip: "213345MB4", name: "COOK CNTY ILL SCH DIST NO 02", coupon: 5.000, maturity: "2037-12-15", face: 35000, price: 103.54 },
-  { cusip: "46247EPP4", name: "IOWA FIN AUTH SINGLE FAMILY", coupon: 4.150, maturity: "2037-07-01", face: 10000, price: 94.738 },
-  { cusip: "61212WL29", name: "MONTANA ST BRD HSG SINGLE F", coupon: 4.150, maturity: "2037-06-01", face: 20000, price: 94.438 },
-  { cusip: "880443JM9", name: "TENNESSEE ENERGY ACQUISITI", coupon: 5.000, maturity: "2035-12-01", face: 30000, price: 100.534 },
-  { cusip: "914729WA2", name: "UNIVERSITY NORTH TEX UNIV R", coupon: 5.000, maturity: "2036-04-15", face: 5000, price: 104.005 }
-];
+const DEFAULT_MUNI_HOLDINGS = [];
 const MUNI_HOLDINGS_VERSION = 1;
 if (LS.get("muniHoldingsVersion", 0) !== MUNI_HOLDINGS_VERSION) {
-  LS.set("muniHoldings", DEFAULT_MUNI_HOLDINGS);
+  if (!LS.get("muniHoldings", null)) LS.set("muniHoldings", DEFAULT_MUNI_HOLDINGS);
   LS.set("muniHoldingsVersion", MUNI_HOLDINGS_VERSION);
 }
 // 지방채·국채 보유현황 공용 컨트롤러 (CUSIP 기준 저장/수정/삭제)
@@ -1099,19 +1033,15 @@ function createBondHoldings(storageKey, defaultData) {
   };
 }
 const muniBonds = createBondHoldings("muniHoldings", DEFAULT_MUNI_HOLDINGS);
-// 보유 미국채(국채) — 지방채와 달리 과세대상. 피델리티 포지션 화면에서 받은 데이터로 시딩(2026-10-21)
-const DEFAULT_GOV_BOND_HOLDINGS = [
-  { cusip: "912810TW8", name: "UNITED STATES TREAS SER BON", coupon: 4.750, maturity: "2043-11-15", face: 230000, price: 92.371 },
-  { cusip: "912810TZ1", name: "UNITED STATES TREAS SER BON", coupon: 4.500, maturity: "2044-02-15", face: 107000, price: 89.34 },
-  { cusip: "912810UN6", name: "UNITED STATES TREAS SER BON", coupon: 4.875, maturity: "2045-08-15", face: 10000, price: 92.867 }
-];
+// 보유 미국채(국채) — 지방채와 달리 과세대상
+const DEFAULT_GOV_BOND_HOLDINGS = [];
 const GOV_BOND_VERSION = 1;
 if (LS.get("govBondVersion", 0) !== GOV_BOND_VERSION) {
-  LS.set("govBondHoldings", DEFAULT_GOV_BOND_HOLDINGS);
+  if (!LS.get("govBondHoldings", null)) LS.set("govBondHoldings", DEFAULT_GOV_BOND_HOLDINGS);
   LS.set("govBondVersion", GOV_BOND_VERSION);
 }
 const govBonds = createBondHoldings("govBondHoldings", DEFAULT_GOV_BOND_HOLDINGS);
-// 계좌 지정(2026-10-22, 사용자 확인): 지방채 6종은 피델리티 개인 계좌, 국채 3종은 LLC 계좌. 이미 지정된 건 유지.
+// 계좌가 비어 있는 기존 채권에 기본 계좌를 한 번 지정(지방채=피델리티 개인, 국채=피델리티 LLC). 이미 지정된 건 유지.
 const BOND_ACCT_VERSION = 1;
 if (LS.get("bondAcctVersion", 0) !== BOND_ACCT_VERSION) {
   [[muniBonds, "fid_p"], [govBonds, "fid_llc"]].forEach(([ctrl, key]) => ctrl.load().forEach(h => { if (!h.acct) ctrl.set(h.cusip, { acct: key }); }));
@@ -1177,10 +1107,10 @@ function renderBondHoldings(boxId, ctrl, emptyLabel) {
 function renderMuniHoldings() { renderBondHoldings("muniHoldBox", muniBonds, "등록된 보유 지방채가 없습니다"); }
 function renderGovBondHoldings() { renderBondHoldings("govHoldBox", govBonds, "등록된 보유 국채가 없습니다"); }
 // ---- 머니마켓펀드(MMF): 잔액 × 7일 수익률(연)로 월 이자 계산, 월말 지급 가정 ----
-// 피델리티 MMF 계좌 캡처(2026-10-22)의 MJMXX 잔액으로 시딩. 수익률은 CNBC 자동 조회 → 실패 시 직접 입력.
-const DEFAULT_MMF = { ticker: "MJMXX", name: "JPMorgan Municipal Money Market (Morgan)", balance: 1270013.88, yield: null };
+// 처음 설치 시 비어 있음 — 티커·잔액은 기기에만 저장(MMF 카드에서 입력).
+const DEFAULT_MMF = { ticker: "", name: "", balance: 0, yield: null };
 const MMF_VERSION = 1;
-if (LS.get("mmfVersion", 0) !== MMF_VERSION) { LS.set("mmf", DEFAULT_MMF); LS.set("mmfVersion", MMF_VERSION); }
+if (LS.get("mmfVersion", 0) !== MMF_VERSION) { if (!LS.get("mmf", null)) LS.set("mmf", DEFAULT_MMF); LS.set("mmfVersion", MMF_VERSION); }
 let mmfAutoYield = null, mmfAutoSrc = "", mmfAutoErr = "";
 // MMF 7일 수익률 자동 조회: 시세 API(CNBC 등)는 MMF 수익률을 안 주므로, 펀드 요약 페이지(Yahoo·Google Finance)를
 // 프록시/jina 리더로 받아 "Yield x.xx%"를 찾는다. 되는 소스가 하나만 있으면 됨(동시에 시도, 30일 캐시).
@@ -1222,7 +1152,8 @@ function renderMmf() {
   const monthly = y != null ? m.balance * y / 100 / 12 : null;
   card.innerHTML = `
     <h2><span class="lbl">머니마켓펀드 (MMF)</span></h2>
-    <div class="bondName">${escapeHtml(m.ticker)} <span class="small" style="font-weight:400">${escapeHtml(m.name)}</span></div>
+    ${m.ticker ? `<div class="bondName">${escapeHtml(m.ticker)} <span class="small" style="font-weight:400">${escapeHtml(m.name)}</span></div>`
+      : `<div class="row" style="align-items:center;gap:6px"><input class="qtyInput" id="mmfTicker" placeholder="MMF 티커 (예: SPAXX)" maxlength="8" style="text-transform:uppercase;flex:1 1 140px"><button class="btn sm" id="mmfTickerSave">저장</button></div>`}
     <div class="small">잔액 ${asOfText(asOfGet("mmf"))}</div>
     <div class="bondStats">
       <div><span class="k">월 이자 예상</span><span class="v hl">${monthly != null ? "$" + fmtInt(monthly) : "—"}</span></div>
@@ -1240,6 +1171,8 @@ function renderMmf() {
   `;
   $("#mmfBalance").addEventListener("change", e => { const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { LS.set("mmf", { ...mmfGet(), balance: v }); markAsOf("mmf"); renderMmf(); renderBondIncome(); } });
   $("#mmfYield").addEventListener("change", e => { const v = parseFloat(e.target.value); LS.set("mmf", { ...mmfGet(), yield: isFinite(v) && v > 0 ? v : null }); renderMmf(); renderBondIncome(); });
+  const tk = $("#mmfTickerSave");
+  if (tk) tk.addEventListener("click", () => { const t = ($("#mmfTicker").value || "").trim().toUpperCase(); if (/^[A-Z0-9]{2,8}$/.test(t)) { LS.set("mmf", { ...mmfGet(), ticker: t, name: "" }); renderMmf(); loadMuniBench(true); } else toast("티커를 확인해주세요"); });
   $("#mmfAcct").addEventListener("change", e => { LS.set("mmf", { ...mmfGet(), acct: e.target.value || null }); renderMmf(); });
   const co = $("#chaseOwner");
   if (co) co.addEventListener("change", e => { LS.set("chaseOwner", e.target.value); renderMmf(); });
@@ -1473,7 +1406,7 @@ async function loadMuniBench(force) {
   benchLoadedFor.muni = true;
   fetchMuniEtfYields().then(rows => { muniEtfData = rows; muniEtfErr = ""; renderMuniCurve(); }).catch(e => { muniEtfData = null; muniEtfErr = e.message; renderMuniCurve(); });
   // MMF 7일 수익률 자동 조회 — 재무부 금리표와 동시에 진행
-  fetchMmfYieldAuto(mmfGet().ticker).then(r => {
+  if (mmfGet().ticker) fetchMmfYieldAuto(mmfGet().ticker).then(r => {
     mmfAutoYield = r.yield; mmfAutoSrc = r.src + (r.stale ? " · 최근 캐시" : ""); mmfAutoErr = "";
     renderMmf(); renderBondIncome();
   }).catch(e => { mmfAutoErr = e.message; renderMmf(); });
@@ -1787,24 +1720,26 @@ function renderCash() {
   if (!card) return;
   const list = cashList();
   card.innerHTML = `
-    <h2><span class="lbl">현금 계좌 (체킹·세이빙)</span></h2>
+    <h2><span class="lbl">현금 · 기타 계좌</span></h2>
     ${list.map(c => `<div class="row" style="align-items:center;gap:6px;margin-bottom:8px;flex-wrap:wrap">
       <input class="qtyInput" data-cash-label="${escapeHtml(c.id)}" value="${escapeHtml(c.label)}" placeholder="계좌 이름" style="flex:1 1 110px;min-width:0">
       <input class="qtyInput" data-cash-bal="${escapeHtml(c.id)}" type="number" step="0.01" inputmode="decimal" value="${c.balance || ""}" placeholder="잔고 $" style="flex:1 1 110px;min-width:0">
       <select class="acctSel" data-cash-owner="${escapeHtml(c.id)}"><option value="personal"${c.owner === "personal" ? " selected" : ""}>개인</option><option value="llc"${c.owner === "llc" ? " selected" : ""}>LLC</option></select>
+      <select class="acctSel" data-cash-kind="${escapeHtml(c.id)}" title="종류"><option value="cash"${c.kind !== "invest" ? " selected" : ""}>현금</option><option value="invest"${c.kind === "invest" ? " selected" : ""}>투자(총액)</option></select>
       <input class="qtyInput" data-cash-apy="${escapeHtml(c.id)}" type="number" step="0.01" inputmode="decimal" value="${c.apy || ""}" placeholder="${c.ticker && cashApy(c) != null ? "자동 " + fmt(cashApy(c)) + "%" : "이자 %(선택)"}" style="flex:0 1 92px;min-width:0" title="연 이자율(선택)">
       ${c.ticker ? `<span class="small" style="flex-basis:100%;margin-top:-4px">${escapeHtml(c.ticker)} · ${cashApy(c) != null ? (c.apy > 0 ? "직접 입력 " + fmt(c.apy) + "%" : `7일 수익률 자동 ${fmt(cashApy(c))}%${cashAutoYield[c.ticker] ? " (" + escapeHtml(cashAutoYield[c.ticker].src) + ")" : ""}`) : "7일 수익률 조회 중… (안 되면 직접 입력)"}</span>` : ""}
       <button class="delbtn" data-cash-del="${escapeHtml(c.id)}">삭제</button>
       <span class="small" style="flex-basis:100%;margin-top:-4px">잔고 ${asOfText(asOfGet("cash:" + c.id))}</span>
     </div>`).join("")}
     <div class="row"><button class="btn sm" id="cashAdd">+ 현금 계좌 추가</button></div>
-    <p class="note">잔고는 직접 입력(은행 앱 잔고). 총자산·자산 배분·계좌별 자산에 합산되고, 이자율을 적으면 연간 수입에도 들어갑니다.</p>
+    <p class="note">잔고는 직접 입력(은행·증권 앱의 총액). 종목을 따로 관리하지 않는 계좌(로빈후드 Smart Income 등)는 종류를 "투자(총액)"로 두면 자산 배분에서 현금과 구분돼요. 이자율·수익률을 적으면 연간 수입에도 들어갑니다.</p>
   `;
   const save = (id, patch) => { const l = cashList(); const c = l.find(x => x.id === id); if (c) { Object.assign(c, patch); LS.set("cash", l); } };
   const rerender = () => { renderCash(); renderHome(lastEtfData, !etfLoadedOnce); };
   $$("[data-cash-label]", card).forEach(i => i.addEventListener("change", () => { save(i.dataset.cashLabel, { label: i.value.trim() || "현금" }); rerender(); }));
   $$("[data-cash-bal]", card).forEach(i => i.addEventListener("change", () => { const v = parseFloat(i.value); save(i.dataset.cashBal, { balance: isFinite(v) ? v : 0 }); markAsOf("cash:" + i.dataset.cashBal); rerender(); }));
   $$("[data-cash-owner]", card).forEach(s => s.addEventListener("change", () => { save(s.dataset.cashOwner, { owner: s.value }); rerender(); }));
+  $$("[data-cash-kind]", card).forEach(s => s.addEventListener("change", () => { save(s.dataset.cashKind, { kind: s.value === "invest" ? "invest" : undefined }); rerender(); }));
   $$("[data-cash-apy]", card).forEach(i => i.addEventListener("change", () => { const v = parseFloat(i.value); save(i.dataset.cashApy, { apy: isFinite(v) ? v : 0 }); rerender(); }));
   $$("[data-cash-del]", card).forEach(b => b.addEventListener("click", () => { LS.set("cash", cashList().filter(x => x.id !== b.dataset.cashDel)); rerender(); }));
   $("#cashAdd").addEventListener("click", () => { const l = cashList(); l.push({ id: uid(), label: "새 계좌", balance: 0, owner: "personal", apy: 0 }); LS.set("cash", l); rerender(); });
@@ -1823,7 +1758,7 @@ function computeHome(etfData, owner = "all") {
   const incBySym = {}; inc.sources.forEach(s => { incBySym[s.label] = s.annual; });
   let divAnnual = 0;
   const byAcct = {}; // 계좌별 내역(필터와 무관하게 전체)
-  const bump = (key, field, v) => { const k = key || "none"; byAcct[k] = byAcct[k] || { etf: 0, muni: 0, gov: 0, mmf: 0, cash: 0 }; byAcct[k][field] += v; };
+  const bump = (key, field, v) => { const k = key || "none"; byAcct[k] = byAcct[k] || { etf: 0, muni: 0, gov: 0, mmf: 0, cash: 0, inv: 0 }; byAcct[k][field] += v; };
   syms.forEach(sym => {
     const qtyTotal = parseFloat(getEtfQty(sym));
     if (!qtyTotal) return;
@@ -1860,20 +1795,21 @@ function computeHome(etfData, owner = "all") {
   const mmfAcct = mmf.acct || "chase";
   bump(mmfAcct, "mmf", mmf.balance || 0);
   const mmfValue = inOwner(mmfAcct) ? (mmf.balance || 0) : 0;
-  let cashValue = 0, cashAnnual = 0;
+  let cashValue = 0, invValue = 0, cashAnnual = 0;
   cashList().forEach(c => {
     const b = c.balance || 0;
     if (!b) return;
-    bump("cash:" + c.id, "cash", b);
-    if (owner === "all" || c.owner === owner) { cashValue += b; cashAnnual += b * (cashApy(c) || 0) / 100; }
+    const inv = c.kind === "invest"; // 총액만 아는 투자 계좌(로빈후드 Smart Income 등)
+    bump("cash:" + c.id, inv ? "inv" : "cash", b);
+    if (owner === "all" || c.owner === owner) { if (inv) invValue += b; else cashValue += b; cashAnnual += b * (cashApy(c) || 0) / 100; }
   });
-  const total = etfValue + muniMv + govMv + mmfValue + cashValue;
+  const total = etfValue + muniMv + govMv + mmfValue + cashValue + invValue;
   const muniAnnual = muni.reduce((s, h) => s + h.face * h.coupon / 100, 0);
   const govAnnual = gov.reduce((s, h) => s + h.face * h.coupon / 100, 0);
   const my = mmfYield();
   const mmfAnnual = my != null ? mmfValue * my / 100 : null;
-  Object.values(byAcct).forEach(a => { a.cash = a.cash || 0; a.total = a.etf + a.muni + a.gov + a.mmf + a.cash; });
-  return { owner, pos: pos.sort((a, b) => b.value - a.value), etfValue, etfCost, dayChange, pending, unclassified, muniMv, govMv, mmfValue, cashValue, cashAnnual, total, divAnnual, muniAnnual, govAnnual, mmfAnnual, mmfYieldKnown: my != null, etfFailed: inc.etfFailed, byAcct };
+  Object.values(byAcct).forEach(a => { a.cash = a.cash || 0; a.inv = a.inv || 0; a.total = a.etf + a.muni + a.gov + a.mmf + a.cash + a.inv; });
+  return { owner, pos: pos.sort((a, b) => b.value - a.value), etfValue, etfCost, dayChange, pending, unclassified, muniMv, govMv, mmfValue, cashValue, invValue, cashAnnual, total, divAnnual, muniAnnual, govAnnual, mmfAnnual, mmfYieldKnown: my != null, etfFailed: inc.etfFailed, byAcct };
 }
 // 총자산 아래 한 줄: 시세는 실시간, 보유·잔고는 가장 오래된 기준일 + 갱신 필요한 계좌 수
 function homeAsOfLine(r) {
@@ -1902,7 +1838,7 @@ function renderHome(etfData, loading) {
       <div><span class="k">오늘 변동 (ETF·주식)</span><span class="v">${signed(r.dayChange, r.etfValue ? r.dayChange / (r.etfValue - r.dayChange) * 100 : null)}</span></div>
       <div><span class="k">ETF·주식 누적손익</span><span class="v">${signed(gain, gainPct)}</span></div>
       <div><span class="k">ETF·주식 평가액</span><span class="v">$${fmtInt(r.etfValue)}</span></div>
-      <div><span class="k">채권 · MMF · 현금</span><span class="v">$${fmtInt(r.muniMv + r.govMv + r.mmfValue + r.cashValue)}</span></div>
+      <div><span class="k">채권 · MMF · 현금 · 기타</span><span class="v">$${fmtInt(r.muniMv + r.govMv + r.mmfValue + r.cashValue + r.invValue)}</span></div>
     </div>
     ${loading ? `<div class="small" style="margin-top:8px">ETF 시세 불러오는 중… (채권·MMF는 먼저 계산됨)</div>` : (r.pending ? `<div class="small" style="margin-top:8px;color:var(--danger)">${r.pending}개 종목 시세 조회 실패 — 총자산에서 빠져 있어요.</div>` : "")}
     ${r.unclassified ? `<div class="small" style="margin-top:8px;color:var(--danger)">계좌 구분이 없는 자산 ${r.unclassified}건은 제외됨 — ETF 탭·채권 탭에서 계좌를 지정하거나 CSV로 가져오면 반영돼요.</div>` : ""}
@@ -1921,7 +1857,7 @@ function renderHome(etfData, loading) {
     ${acctRows.map((a, i) => `<div class="etfRow" style="grid-template-columns:1fr auto;${i === 0 ? "border-top:0;margin-top:6px" : ""}">
       <div><div class="sym">${escapeHtml(a.label)}${a.owner ? ` <span class="acctTag">${OWNER_LABEL[a.owner]}</span>` : ""}</div>
         ${acctAsOfKey(a.key) ? `<div class="small">${asOfText(asOfGet(acctAsOfKey(a.key)))}</div>` : ""}
-        <div class="nm">${[a.v.etf ? `ETF·주식 $${fmtInt(a.v.etf)}` : "", a.v.muni ? `지방채 $${fmtInt(a.v.muni)}` : "", a.v.gov ? `국채 $${fmtInt(a.v.gov)}` : "", a.v.mmf ? `MMF $${fmtInt(a.v.mmf)}` : "", a.v.cash ? `현금 $${fmtInt(a.v.cash)}` : ""].filter(Boolean).join(" · ")}</div></div>
+        <div class="nm">${[a.v.etf ? `ETF·주식 $${fmtInt(a.v.etf)}` : "", a.v.muni ? `지방채 $${fmtInt(a.v.muni)}` : "", a.v.gov ? `국채 $${fmtInt(a.v.gov)}` : "", a.v.mmf ? `MMF $${fmtInt(a.v.mmf)}` : "", a.v.cash ? `현금 $${fmtInt(a.v.cash)}` : "", a.v.inv ? `투자(총액) $${fmtInt(a.v.inv)}` : ""].filter(Boolean).join(" · ")}</div></div>
       <div class="px" style="text-align:right">$${fmtInt(a.v.total)}<div class="small">${grand ? fmt(a.v.total / grand * 100, 1) : "-"}%</div></div>
     </div>`).join("")}
     ${ownerTotals.none ? `<div class="small" style="margin-top:8px">"구분 없음" $${fmtInt(ownerTotals.none)}은 어느 계좌인지 아직 지정 안 된 자산이에요. ETF 탭 종목의 계좌 선택칸, 채권 탭 종목의 계좌 선택칸, 또는 CSV 가져오기로 지정할 수 있어요.</div>` : ""}
@@ -1931,7 +1867,8 @@ function renderHome(etfData, loading) {
     { label: "지방채", v: r.muniMv, c: "#7FB4F2" },
     { label: "국채", v: r.govMv, c: "#C9A227" },
     { label: "MMF(현금성)", v: r.mmfValue, c: "#9AA7A1" },
-    { label: "현금(체킹)", v: r.cashValue, c: "#6FBF9A" }
+    { label: "현금", v: r.cashValue, c: "#6FBF9A" },
+    { label: "기타 투자(총액)", v: r.invValue, c: "#B48EE0" }
   ].filter(p => p.v > 0);
   $("#homeAlloc").innerHTML = `
     <h2><span class="lbl">자산 배분</span></h2>
@@ -1948,7 +1885,7 @@ function renderHome(etfData, loading) {
       <div><span class="k">지방채 이자 (비과세)</span><span class="v">$${fmtInt(r.muniAnnual)}</span></div>
       <div><span class="k">국채 이자</span><span class="v">$${fmtInt(r.govAnnual)}</span></div>
       <div><span class="k">MMF 이자</span><span class="v">${r.mmfAnnual != null ? "$" + fmtInt(r.mmfAnnual) : "수익률 필요"}</span></div>
-      ${r.cashAnnual ? `<div><span class="k">현금 이자</span><span class="v">$${fmtInt(r.cashAnnual)}</span></div>` : ""}
+      ${r.cashAnnual ? `<div><span class="k">현금 이자·기타 수익</span><span class="v">$${fmtInt(r.cashAnnual)}</span></div>` : ""}
     </div>
     ${!r.mmfYieldKnown ? `<div class="small" style="margin-top:6px">MMF 수익률이 아직 없어 MMF 이자는 빠져 있어요 (채권 탭에서 자동 조회 또는 입력).</div>` : ""}
   `;
