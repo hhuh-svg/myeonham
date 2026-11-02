@@ -2094,6 +2094,7 @@ function previewFidelityCsv(text) {
     }
   } catch (e) { box.innerHTML = `<div class="status err">${escapeHtml(e.message)}</div>`; importPending = null; return; }
   p.cashUpdates = upd && Array.isArray(upd.cash) ? upd.cash.filter(c => c && c.id && isFinite(c.balance)) : [];
+  p.mmfUpdate = upd && upd.mmf && isFinite(upd.mmf.balance) ? upd.mmf : null; // JPM MMF 카드 잔액
   importPending = p;
   const syms = LS.get("etfSymbols", DEFAULT_ETFS);
   const etfRows = Object.entries(p.etf).sort((a, b) => a[0].localeCompare(b[0])).map(([sym, e]) => {
@@ -2127,6 +2128,7 @@ function previewFidelityCsv(text) {
       ${p.gov.map(h => bondLine(h, "국채")).join("")}
       ${p.mmf.map(m => `<div class="small">현금(core) ${escapeHtml(m.ticker)} $${fmtInt(m.balance)}${m.pending ? ` <span style="color:var(--muted)">(잔액 $${fmtInt(m.balance - m.pending)} − 결제 대기 $${fmtInt(-m.pending)})</span>` : ""}${m.acctName ? ` · ${escapeHtml(m.acctName)}` : ""} → 자산 탭 현금 계좌에 반영</div>`).join("")}
       ${gone.etf.length || gone.bonds.length ? `<div class="small" style="margin-top:6px;color:var(--danger)">이 계좌 CSV에 없어 빠지는 항목(매도·만기): ${escapeHtml([...gone.etf.map(g => `${g.sym}(${acctLabel(g.key)})`), ...gone.bonds.map(b => b.name)].join(", "))}</div>` : ""}
+      ${p.mmfUpdate ? `<div class="small" style="margin-top:6px"><b>MMF</b> ${escapeHtml(mmfGet().ticker || "MMF")} $${fmtInt(mmfGet().balance || 0)} → <b>$${fmtInt(p.mmfUpdate.balance)}</b></div>` : ""}
       ${p.cashUpdates.length ? `<div class="small" style="margin-top:6px"><b>현금 · 기타 계좌</b></div>${p.cashUpdates.map(u => { const cur = cashList().find(c => c.id === u.id); return `<div class="small">${escapeHtml(u.label || (cur && cur.label) || u.id)} ${cur ? `$${fmtInt(cur.balance || 0)} → ` : "<span style='color:var(--accent)'>신규</span> "}<b>$${fmtInt(u.balance)}</b>${u.kind === "invest" ? " (투자 총액)" : ""}${u.apy ? ` · 이자 ${fmt(u.apy)}%` : ""}</div>`; }).join("")}` : ""}
       <div class="row" style="margin-top:10px"><button class="btn sm primary" id="importApply">반영하기</button><button class="btn sm" id="importCancel">취소</button></div>
       <p class="note">CSV에 들어 있는 계좌는 CSV가 기준이에요 — 그 계좌에서 CSV에 없는 종목·채권은 판 것으로 보고 빠집니다. CSV에 없는 계좌(다른 피델리티 계좌, 로빈후드 등)는 그대로예요. 개인·LLC 파일 두 개를 한 번에 골라도 돼요. 채권 가격은 CSV의 Last Price.</p>
@@ -2215,6 +2217,7 @@ function applyFidelityImport() {
     });
     LS.set("cash", list);
   }
+  if (p.mmfUpdate) { LS.set("mmf", { ...mmfGet(), balance: +p.mmfUpdate.balance, ...(p.mmfUpdate.ticker ? { ticker: p.mmfUpdate.ticker } : {}) }); markAsOf("mmf"); }
   LS.set("lastImportAt", Date.now());
   markAsOf(...[...new Set(p.accounts.map(keyOf))].map(k => k && "acct:" + k), ...p.muni.concat(p.gov).map(h => "bond:" + h.cusip), ...cashIds.map(id => "cash:" + id));
   importPending = null;
