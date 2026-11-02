@@ -1927,8 +1927,11 @@ function renderHome(etfData, loading) {
 }
 async function loadHome(force) {
   if (!etfLoadedOnce || force) renderHome(lastEtfData, true);
+  // 환율(원화 환산)은 따로 받아서 오면 다시 그림 — ETF 시세가 다 왔는데 환율 조회를 기다리느라 "불러오는 중"으로 남던 문제
+  let etfDone = false;
+  if (!fxRate && !fxLoaded) loadFx().catch(() => {}).then(() => renderHome(lastEtfData, !etfDone));
   try { await (force ? loadEtf() : ensureEtfLoaded()); } catch {}
-  if (!fxRate && !fxLoaded) { try { await loadFx(); } catch {} } // 원화 환산용
+  etfDone = true;
   renderHome(lastEtfData, false);
   setUpdated(nowLabel() + " 업데이트");
   loadCashYields().then(changed => { if (changed) { renderCash(); renderHome(lastEtfData, false); } }); // SPAXX 등 현금성 계좌 이자율
