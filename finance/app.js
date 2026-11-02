@@ -1050,7 +1050,16 @@ if (LS.get("bondAcctVersion", 0) !== BOND_ACCT_VERSION) {
 function isoDate(d) { return d.toISOString().slice(0, 10); }
 function daysUntil(d) { const t0 = new Date(); const t = new Date(Date.UTC(t0.getUTCFullYear(), t0.getUTCMonth(), t0.getUTCDate())); return Math.round((d.getTime() - t.getTime()) / 86400000); }
 // 공시된 다음 쿠폰일이 없을 때, 만기 월/일 기준 6개월 간격 지급을 가정해 다음 지급일을 추정
-function nextCouponDate(maturityISO) {
+// 만기일이 31일 등이면 짧은 달엔 그 달 말일에 지급(국채 노트 관행) — Date.UTC가 다음 달로 넘기지 않게
+function utcDayClamped(y, m, d) { return new Date(Date.UTC(y, m - 1, Math.min(d, new Date(Date.UTC(y, m, 0)).getUTCDate()))); }
+// 연 이자(세전): 쿠폰 채권은 액면×쿠폰, 할인채(T-bill, 쿠폰 0%)는 만기까지 남은 할인폭을 연 단위로 환산
+function bondAnnualIncome(h) {
+  if (h.coupon > 0) return h.face * h.coupon / 100;
+  const yrs = (Date.parse(h.maturity + "T00:00:00Z") - Date.now()) / (365.25 * 86400000);
+  return yrs > 0 ? Math.max(0, h.face * (100 - h.price) / 100) / Math.max(yrs, 1 / 12) : 0;
+}
+function nextCouponDate(maturityISO, coupon) {
+  if (coupon === 0) return null;
   const [, mmStr, mdStr] = maturityISO.split("-");
   const mm = parseInt(mmStr, 10), md = parseInt(mdStr, 10);
   const now = new Date();
@@ -1058,7 +1067,7 @@ function nextCouponDate(maturityISO) {
   const candidates = [];
   for (let yOff = -1; yOff <= 1; yOff++) {
     const y = now.getUTCFullYear() + yOff;
-    [[mm, y], [((mm + 5) % 12) + 1, mm + 6 > 12 ? y + 1 : y]].forEach(([m, yy]) => candidates.push(new Date(Date.UTC(yy, m - 1, md))));
+    [[mm, y], [((mm + 5) % 12) + 1, mm + 6 > 12 ? y + 1 : y]].forEach(([m, yy]) => candidates.push(utcDayClamped(yy, m, md)));
   }
   const future = candidates.filter(d => d.getTime() > today.getTime()).sort((a, b) => a - b);
   return future[0] || null;
@@ -1069,11 +1078,11 @@ function renderBondHoldings(boxId, ctrl, emptyLabel) {
   const list = ctrl.load();
   if (!list.length) { box.innerHTML = `<div class="empty2">${emptyLabel}</div>`; return; }
   const enriched = list.map(h => {
-    const nc = nextCouponDate(h.maturity);
-    return { ...h, nc, amt: h.face * h.coupon / 100 / 2, mv: h.face * h.price / 100 };
+    const nc = nextCouponDate(h.maturity, h.coupon);
+    return { ...h, nc, amt: h.face * h.coupon / 100 / 2, annual: bondAnnualIncome(h), mv: h.face * h.price / 100 };
   }).sort((a, b) => (a.nc ? a.nc.getTime() : Infinity) - (b.nc ? b.nc.getTime() : Infinity));
   const totalMv = enriched.reduce((s, h) => s + h.mv, 0);
-  const totalAnnual = enriched.reduce((s, h) => s + h.amt * 2, 0);
+  const totalAnnual = enriched.reduce((s, h) => s + h.annual, 0);
   box.innerHTML = `
     <div class="bondStats" style="margin:0 0 12px">
       <div><span class="k">연 이자 합계 (세전)</span><span class="v hl">$${fmtInt(totalAnnual)}</span></div>
@@ -1082,13 +1091,18 @@ function renderBondHoldings(boxId, ctrl, emptyLabel) {
     ${enriched.map(h => `
       <div class="bondCard">
         <div class="bondName">${escapeHtml(h.name)}</div>
-        <div class="small">CUSIP ${escapeHtml(h.cusip)} · 쿠폰 ${fmt(h.coupon, 3)}% · 만기 ${h.maturity}</div>
-        <div class="bondStats">
+        <div class="small">CUSIP ${escapeHtml(h.cusip)} · ${h.coupon > 0 ? `쿠폰 ${fmt(h.coupon, 3)}%` : "할인채(쿠폰 없음)"} · 만기 ${h.maturity}</div>
+        ${h.coupon > 0 ? `<div class="bondStats">
           <div><span class="k">다음 쿠폰</span><span class="v hl">${h.nc ? fmtDateShort(isoDate(h.nc)) : "-"}${h.nc ? ` (D-${daysUntil(h.nc)})` : ""}</span></div>
           <div><span class="k">쿠폰금액 (반기)</span><span class="v hl">$${fmt(h.amt, 2)}</span></div>
-          <div><span class="k">연 이자</span><span class="v hl">$${fmt(h.amt * 2, 2)}</span></div>
+          <div><span class="k">연 이자</span><span class="v hl">$${fmt(h.annual, 2)}</span></div>
           <div><span class="k">평가액</span><span class="v">$${fmtInt(h.mv)}</span></div>
-        </div>
+        </div>` : `<div class="bondStats">
+          <div><span class="k">만기 수령 (D-${daysUntil(new Date(h.maturity + "T00:00:00Z"))})</span><span class="v hl">$${fmtInt(h.face)}</span></div>
+          <div><span class="k">만기 차익 (현재가 기준)</span><span class="v hl">$${fmtInt(h.face - h.mv)}</span></div>
+          <div><span class="k">연 환산 수익</span><span class="v hl">$${fmtInt(h.annual)}${h.mv ? ` (${fmt(h.annual / h.mv * 100)}%)` : ""}</span></div>
+          <div><span class="k">평가액</span><span class="v">$${fmtInt(h.mv)}</span></div>
+        </div>`}
         <div class="bondFoot">
           <span class="small">액면 $${fmtInt(h.face)} · 가격 ${asOfText(asOfGet("bond:" + h.cusip) || asOfGet("acct:" + h.acct))}</span>
           <input class="qtyInput" data-price="${escapeHtml(h.cusip)}" type="number" step="0.001" value="${h.price}">
@@ -1181,6 +1195,11 @@ function renderMmf() {
 function bondIncomeEvents(start, end) {
   const events = [];
   [[muniBonds, "muni"], [govBonds, "gov"]].forEach(([ctrl, kind]) => ctrl.load().forEach(h => {
+    if (!(h.coupon > 0)) { // 할인채: 이자는 없고 만기에 액면을 받음 → 만기일에 차익만 이자로 표시
+      const md = new Date(h.maturity + "T00:00:00Z");
+      if (md >= start && md < end) events.push({ date: md, amount: Math.max(0, h.face * (100 - h.price) / 100), kind, label: h.name + " 만기 차익" });
+      return;
+    }
     const half = h.face * h.coupon / 100 / 2;
     couponDatesInWindow(h.maturity, start, end).forEach(d => events.push({ date: d, amount: half, kind, label: h.name }));
   }));
@@ -1441,7 +1460,7 @@ function couponDatesInWindow(maturityISO, start, end) {
   const out = [];
   for (let y = start.getUTCFullYear() - 1; y <= end.getUTCFullYear() + 1; y++) {
     [mm, ((mm + 5) % 12) + 1].forEach(m => {
-      const d = new Date(Date.UTC(y, m - 1, md));
+      const d = utcDayClamped(y, m, md);
       if (d >= start && d < end && d <= maturity) out.push(d);
     });
   }
@@ -1644,7 +1663,7 @@ function homeSkeleton() {
       <div class="row" style="margin-top:10px">
         <button class="btn sm primary" id="importBtn">CSV 파일 선택</button>
         <button class="btn sm" id="importPasteBtn">텍스트 붙여넣기</button>
-        <input type="file" id="importFile" accept=".csv,text/csv,text/plain" hidden>
+        <input type="file" id="importFile" accept=".csv,text/csv,text/plain" multiple hidden>
       </div>
       <textarea id="importPaste" class="qtyInput" style="width:100%;min-height:90px;margin-top:8px;font-family:var(--font-mono);font-size:11px" placeholder="CSV 내용을 통째로 붙여넣고 아래 버튼을 누르세요" hidden></textarea>
       <div class="row" id="importPasteRow" style="margin-top:8px" hidden><button class="btn sm primary" id="importPasteGo">붙여넣은 내용 읽기</button></div>
@@ -1674,11 +1693,9 @@ function homeSkeleton() {
   $("#restoreFile").addEventListener("change", restoreData);
   $("#importBtn").addEventListener("click", () => $("#importFile").click());
   $("#importFile").addEventListener("change", e => {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    const reader = new FileReader();
-    reader.onload = () => previewFidelityCsv(String(reader.result));
-    reader.readAsText(f);
+    const files = [...(e.target.files || [])];
+    if (!files.length) return;
+    Promise.all(files.map(f => f.text())).then(texts => previewFidelityCsv(texts.join("\n"))); // 헤더가 반복돼도 파서가 처리
     e.target.value = "";
   });
   $("#importPasteBtn").addEventListener("click", () => { const t = $("#importPaste"); t.hidden = !t.hidden; $("#importPasteRow").hidden = t.hidden; if (!t.hidden) t.focus(); });
@@ -1804,8 +1821,8 @@ function computeHome(etfData, owner = "all") {
     if (owner === "all" || c.owner === owner) { if (inv) invValue += b; else cashValue += b; cashAnnual += b * (cashApy(c) || 0) / 100; }
   });
   const total = etfValue + muniMv + govMv + mmfValue + cashValue + invValue;
-  const muniAnnual = muni.reduce((s, h) => s + h.face * h.coupon / 100, 0);
-  const govAnnual = gov.reduce((s, h) => s + h.face * h.coupon / 100, 0);
+  const muniAnnual = muni.reduce((s, h) => s + bondAnnualIncome(h), 0);
+  const govAnnual = gov.reduce((s, h) => s + bondAnnualIncome(h), 0);
   const my = mmfYield();
   const mmfAnnual = my != null ? mmfValue * my / 100 : null;
   Object.values(byAcct).forEach(a => { a.cash = a.cash || 0; a.inv = a.inv || 0; a.total = a.etf + a.muni + a.gov + a.mmf + a.cash + a.inv; });
@@ -1949,25 +1966,39 @@ function csvNum(v) {
 }
 // 피델리티 CSV 한 장을 { etf:{sym:{qty,costTotal,byAcct:{계좌명:{qty,costTotal,hasCost}}}}, muni:[], gov:[], mmf:[], skipped:[], accounts:[] } 로 분류
 function parseFidelityPositions(rows) {
-  const hi = rows.findIndex(r => r.some(c => /^symbol$/i.test(c.trim())) && r.some(c => /quantity/i.test(c)));
-  if (hi < 0) throw new Error("피델리티 Positions CSV 형식이 아니에요 (Symbol/Quantity 헤더 없음)");
-  const header = rows[hi].map(h => h.trim().toLowerCase());
-  const col = (...names) => { for (const n of names) { const i = header.findIndex(h => h === n); if (i >= 0) return i; } for (const n of names) { const i = header.findIndex(h => h.includes(n)); if (i >= 0) return i; } return -1; };
-  const cSym = col("symbol"), cDesc = col("description"), cQty = col("quantity"), cLast = col("last price"), cVal = col("current value"),
-    cCostTotal = col("cost basis total", "cost basis"), cCostAvg = col("average cost basis", "average cost"), cAcct = col("account name", "account number");
-  const out = { broker: "fidelity", etf: {}, muni: [], gov: [], mmf: [], skipped: [], accounts: new Set() };
-  for (let r = hi + 1; r < rows.length; r++) {
-    const row = rows[r];
-    if (!row || row.length < 3) continue;
-    let sym = (row[cSym] || "").trim().toUpperCase().replace(/\*+$/, "");
-    const desc = (row[cDesc] || "").trim();
-    const qty = csvNum(row[cQty]);
-    if (!sym || /^pending activity$/i.test(sym) || /^(cash|total)$/i.test(sym)) { if (sym) out.skipped.push(sym); continue; }
-    if (qty == null) { out.skipped.push(sym); continue; }
-    const acctName = cAcct >= 0 ? (row[cAcct] || "").trim() : "";
+  const isHeader = r => r.some(c => /^symbol$/i.test(c.trim())) && r.some(c => /quantity/i.test(c));
+  if (!rows.some(isHeader)) throw new Error("피델리티 Positions CSV 형식이 아니에요 (Symbol/Quantity 헤더 없음)");
+  let c = null; // 헤더가 다시 나오면(여러 계좌 CSV를 이어 붙인 경우) 열 위치를 다시 잡음
+  const setHeader = r => {
+    const header = r.map(h => h.trim().toLowerCase());
+    const col = (...names) => { for (const n of names) { const i = header.findIndex(h => h === n); if (i >= 0) return i; } for (const n of names) { const i = header.findIndex(h => h.includes(n)); if (i >= 0) return i; } return -1; };
+    c = { sym: col("symbol"), desc: col("description"), qty: col("quantity"), last: col("last price"), val: col("current value"),
+      costTotal: col("cost basis total", "cost basis"), costAvg: col("average cost basis", "average cost"), acct: col("account name", "account number") };
+  };
+  const out = { broker: "fidelity", etf: {}, muni: [], gov: [], mmf: [], skipped: [], accounts: new Set(), pending: {} };
+  for (const row of rows) {
+    if (!row) continue;
+    if (isHeader(row)) { setHeader(row); continue; }
+    if (!c || row.length < 3) continue;
+    const sym = (row[c.sym] || "").trim().toUpperCase().replace(/\*+$/, "");
+    const desc = (row[c.desc] || "").trim();
+    const acctName = c.acct >= 0 ? (row[c.acct] || "").trim() : "";
+    const qty = csvNum(row[c.qty]);
+    const value = csvNum(row[c.val]);
+    if (!sym) continue;
+    if (/^pending activity$/i.test(sym)) { // 결제 대기 금액(보통 매수 대금, 음수) — 같은 계좌 core 현금에서 빼야 계좌 총액과 맞음
+      if (value != null) out.pending[acctName] = (out.pending[acctName] || 0) + value;
+      continue;
+    }
+    if (/^(cash|total)$/i.test(sym)) { out.skipped.push(sym); continue; }
     if (acctName) out.accounts.add(acctName);
-    const last = csvNum(row[cLast]);
-    const value = csvNum(row[cVal]);
+    if (/XX$/.test(sym) || /MONEY MARKET|MONEY MKT/i.test(desc)) { // 머니마켓(core): 수량 칸이 비어 있고 Current value가 잔액
+      const bal = value != null ? value : qty;
+      if (bal != null) out.mmf.push({ ticker: sym, name: desc.slice(0, 50), balance: bal, acctName });
+      continue;
+    }
+    if (qty == null) { out.skipped.push(sym); continue; }
+    const last = csvNum(row[c.last]);
     const couponM = desc.match(/(\d{1,2}\.\d{2,5})\s*%/);
     const matM = desc.match(/(\d{2})\/(\d{2})\/(\d{4})/);
     const isCusip = /^[0-9A-Z]{9}$/.test(sym) && /\d/.test(sym);
@@ -1976,23 +2007,33 @@ function parseFidelityPositions(rows) {
       (/UNITED STATES TREAS|US TREAS|U S TREAS|TREASURY/i.test(desc) ? out.gov : out.muni).push(h);
       continue;
     }
-    if (/XX$/.test(sym) || /MONEY MARKET|MONEY MKT/i.test(desc)) { // 머니마켓펀드: 수량 = 잔액
-      out.mmf.push({ ticker: sym, name: desc.slice(0, 50), balance: value != null ? value : qty, acctName });
-      continue;
-    }
     if (!/^[A-Z][A-Z0-9.\-]{0,9}$/.test(sym)) { out.skipped.push(sym); continue; }
-    const costTotal = csvNum(row[cCostTotal]);
-    const costAvg = csvNum(row[cCostAvg]);
+    const costTotal = csvNum(row[c.costTotal]);
+    const costAvg = csvNum(row[c.costAvg]);
     const e = out.etf[sym] || (out.etf[sym] = { qty: 0, costTotal: 0, hasCost: false, name: desc, byAcct: {} });
     const a = e.byAcct[acctName] || (e.byAcct[acctName] = { qty: 0, costTotal: 0, hasCost: false });
     e.qty += qty; a.qty += qty;
     const ct = costTotal != null ? costTotal : (costAvg != null ? costAvg * qty : null);
     if (ct != null) { e.costTotal += ct; e.hasCost = true; a.costTotal += ct; a.hasCost = true; }
   }
+  out.mmf.forEach(m => { const pd = out.pending[m.acctName]; if (pd) { m.pending = pd; m.balance += pd; delete out.pending[m.acctName]; } });
   out.accounts = [...out.accounts];
   if (!Object.keys(out.etf).length && !out.muni.length && !out.gov.length && !out.mmf.length) throw new Error("읽을 수 있는 보유 종목이 없어요");
   return out;
 }
+// CSV에 들어 있는 계좌에서, CSV에 없는 기존 종목·채권(= 매도·만기) 목록
+function fidelityRemovals(p, keyOf) {
+  const imported = new Set(p.accounts.map(keyOf).filter(Boolean));
+  const inCsv = new Set();
+  Object.entries(p.etf).forEach(([sym, e]) => Object.keys(e.byAcct).forEach(n => inCsv.add(sym + "|" + keyOf(n))));
+  const etf = [];
+  Object.entries(etfByAcctAll()).forEach(([sym, m]) => Object.keys(m).forEach(k => { if (imported.has(k) && !inCsv.has(sym + "|" + k)) etf.push({ sym, key: k }); }));
+  const csvCusips = new Set(p.muni.concat(p.gov).map(h => h.cusip));
+  const bonds = [];
+  [muniBonds, govBonds].forEach(ctrl => ctrl.load().forEach(h => { if (imported.has(h.acct) && !csvCusips.has(h.cusip)) bonds.push({ ctrl, cusip: h.cusip, name: h.name }); }));
+  return { etf, bonds };
+}
+function defaultFidAcct(name) { return /\bllc\b|limited liability/i.test(name) ? "fid_llc" : "fid_p"; }
 // 로빈후드는 보유현황 CSV가 없고 거래내역(Account activity report) CSV만 있음 → 매수·매도를 합산해 보유수량/평균단가를 복원
 // 열: Activity Date, Process Date, Settle Date, Instrument, Description, Trans Code, Quantity, Price, Amount
 function parseRobinhoodActivity(rows) {
@@ -2059,19 +2100,21 @@ function previewFidelityCsv(text) {
   } else {
     const acctMap = LS.get("acctMap", {}) || {};
     const changedCount = etfRows.filter(r => r.isNew || Math.abs(r.oldQ - r.e.qty) > 1e-6).length;
+    const gone = fidelityRemovals(p, name => acctMap[name] || defaultFidAcct(name));
     const bondLine = (h, kind) => `<div class="small">${kind} ${escapeHtml(h.cusip)} ${escapeHtml(h.name)} · 쿠폰 ${fmt(h.coupon, 3)}% · 만기 ${h.maturity} · 액면 $${fmtInt(h.face)} · 가격 ${fmt(h.price, 3)}${h.acctName ? ` · ${escapeHtml(h.acctName)}` : ""}</div>`;
     box.innerHTML = `
       <div class="small" style="margin-bottom:6px"><b>피델리티 보유현황</b> · ETF·주식 ${etfRows.length}종목(변경 ${changedCount}) · 지방채 ${p.muni.length} · 국채 ${p.gov.length} · MMF ${p.mmf.length}${p.skipped.length ? ` · 건너뜀: ${escapeHtml(p.skipped.join(", "))}` : ""}</div>
       ${p.accounts.length ? `<div class="small" style="margin-bottom:4px"><b>계좌 구분</b> — CSV의 계좌마다 개인/LLC를 골라주세요 (한 번 고르면 기억)</div>
-        ${p.accounts.map(name => { const def = acctMap[name] || (/llc/i.test(name) ? "fid_llc" : "fid_p"); return `<div class="row" style="align-items:center;gap:8px;margin-bottom:4px"><span class="small" style="min-width:0;overflow:hidden;text-overflow:ellipsis">${escapeHtml(name)}</span><select class="acctSel" data-acct-map="${escapeHtml(name)}"><option value="fid_p"${def === "fid_p" ? " selected" : ""}>피델리티 개인</option><option value="fid_llc"${def === "fid_llc" ? " selected" : ""}>피델리티 LLC</option></select></div>`; }).join("")}` : `<div class="small" style="color:var(--danger)">CSV에 계좌 이름 열이 없어 계좌 구분 없이 가져옵니다.</div>`}
+        ${p.accounts.map(name => { const def = acctMap[name] || defaultFidAcct(name); return `<div class="row" style="align-items:center;gap:8px;margin-bottom:4px"><span class="small" style="min-width:0;overflow:hidden;text-overflow:ellipsis">${escapeHtml(name)}</span><select class="acctSel" data-acct-map="${escapeHtml(name)}"><option value="fid_p"${def === "fid_p" ? " selected" : ""}>피델리티 개인</option><option value="fid_llc"${def === "fid_llc" ? " selected" : ""}>피델리티 LLC</option></select></div>`; }).join("")}` : `<div class="small" style="color:var(--danger)">CSV에 계좌 이름 열이 없어 계좌 구분 없이 가져옵니다.</div>`}
       ${etfRows.length ? `<div style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px 8px;margin-top:6px">
         ${etfRows.map(r => `<div class="small"><b>${escapeHtml(r.sym)}</b>${r.isNew ? " <span style='color:var(--accent)'>신규</span>" : ""} 수량 ${r.oldQ ? fmt(r.oldQ, 3) + " → " : ""}<b>${fmt(r.e.qty, 3)}</b>${r.newC != null ? ` · 단가 $${fmt(r.newC)}` : ""}${Object.keys(r.e.byAcct).length > 1 ? ` <span style="color:var(--muted)">(${Object.entries(r.e.byAcct).map(([n, a]) => `${escapeHtml(n)} ${fmt(a.qty, 3)}`).join(" / ")})</span>` : ""}</div>`).join("")}
       </div>` : ""}
       ${p.muni.map(h => bondLine(h, "지방채")).join("")}
       ${p.gov.map(h => bondLine(h, "국채")).join("")}
-      ${p.mmf.map(m => `<div class="small">현금(core) ${escapeHtml(m.ticker)} $${fmtInt(m.balance)}${m.acctName ? ` · ${escapeHtml(m.acctName)}` : ""} → 자산 탭 현금 계좌에 반영</div>`).join("")}
+      ${p.mmf.map(m => `<div class="small">현금(core) ${escapeHtml(m.ticker)} $${fmtInt(m.balance)}${m.pending ? ` <span style="color:var(--muted)">(잔액 $${fmtInt(m.balance - m.pending)} − 결제 대기 $${fmtInt(-m.pending)})</span>` : ""}${m.acctName ? ` · ${escapeHtml(m.acctName)}` : ""} → 자산 탭 현금 계좌에 반영</div>`).join("")}
+      ${gone.etf.length || gone.bonds.length ? `<div class="small" style="margin-top:6px;color:var(--danger)">이 계좌 CSV에 없어 빠지는 항목(매도·만기): ${escapeHtml([...gone.etf.map(g => `${g.sym}(${acctLabel(g.key)})`), ...gone.bonds.map(b => b.name)].join(", "))}</div>` : ""}
       <div class="row" style="margin-top:10px"><button class="btn sm primary" id="importApply">반영하기</button><button class="btn sm" id="importCancel">취소</button></div>
-      <p class="note">CSV에 없는 기존 종목은 그대로 둡니다(판 종목은 ETF 탭에서 삭제). 피델리티 계좌분만 갱신되고 로빈후드 계좌분은 유지됩니다. 채권은 CUSIP 기준 갱신/추가, 가격은 CSV의 Last Price.</p>
+      <p class="note">CSV에 들어 있는 계좌는 CSV가 기준이에요 — 그 계좌에서 CSV에 없는 종목·채권은 판 것으로 보고 빠집니다. CSV에 없는 계좌(다른 피델리티 계좌, 로빈후드 등)는 그대로예요. 개인·LLC 파일 두 개를 한 번에 골라도 돼요. 채권 가격은 CSV의 Last Price.</p>
     `;
   }
   $("#importApply").addEventListener("click", applyFidelityImport);
@@ -2106,15 +2149,24 @@ function applyFidelityImport() {
   $$("[data-acct-map]").forEach(sel => { acctMap[sel.dataset.acctMap] = sel.value; });
   LS.set("acctMap", acctMap);
   const keyOf = name => (name && acctMap[name]) || (p.accounts.length ? "fid_p" : null);
+  const imported = new Set(p.accounts.map(keyOf).filter(Boolean)); // 이 CSV에 들어 있는 계좌만 CSV 기준으로 덮어씀
+  const gone = fidelityRemovals(p, keyOf);
+  gone.etf.forEach(({ sym, key }) => {
+    const cur = etfByAcctGet(sym) || {};
+    delete cur[key];
+    if (Object.keys(cur).length) { etfByAcctSet(sym, cur); etfRecomputeTotals(sym); } else { etfByAcctSet(sym, null); setEtfQty(sym, ""); setEtfCost(sym, ""); }
+  });
+  gone.bonds.forEach(b => b.ctrl.delete(b.cusip));
   Object.entries(p.etf).forEach(([sym, e]) => {
     if (!syms.includes(sym)) { syms.push(sym); added++; }
     const cur = etfByAcctGet(sym) || {};
-    Object.keys(cur).forEach(k => { if (k.startsWith("fid_")) delete cur[k]; }); // 피델리티분은 CSV가 전체 진실
+    Object.keys(cur).forEach(k => { if (imported.has(k)) delete cur[k]; });
     Object.entries(e.byAcct).forEach(([name, a]) => {
       const k = keyOf(name);
       if (!k) return;
       const prev = cur[k] || { qty: 0, costTotal: 0 };
       cur[k] = { qty: prev.qty + a.qty, costTotal: a.hasCost && prev.costTotal != null ? prev.costTotal + a.costTotal : null };
+      imported.add(k);
     });
     if (Object.keys(cur).length) { etfByAcctSet(sym, cur); etfRecomputeTotals(sym); }
     else { setEtfQty(sym, e.qty); if (e.hasCost && e.qty) setEtfCost(sym, Math.round(e.costTotal / e.qty * 100) / 100); }
