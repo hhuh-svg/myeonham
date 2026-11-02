@@ -1661,9 +1661,9 @@ function homeSkeleton() {
       <h2><span class="lbl">피델리티 CSV 가져오기</span></h2>
       <div class="small">피델리티 웹사이트 → Accounts &amp; Trade → Portfolio → <b>Positions</b> → 오른쪽 위 <b>Download</b>로 받은 CSV를 넣으면 ETF·주식 수량/매수단가, 지방채·국채, MMF 잔액을 한 번에 읽어 미리보기 후 반영합니다. 계좌가 여러 개면 같은 종목은 합산(가중평균단가).</div>
       <div class="row" style="margin-top:10px">
-        <button class="btn sm primary" id="importBtn">CSV 파일 선택</button>
+        <button class="btn sm primary" id="importBtn">파일 선택 (CSV·업데이트 파일)</button>
         <button class="btn sm" id="importPasteBtn">텍스트 붙여넣기</button>
-        <input type="file" id="importFile" accept=".csv,text/csv,text/plain" multiple hidden>
+        <input type="file" id="importFile" accept=".csv,.json,text/csv,text/plain,application/json" multiple hidden>
       </div>
       <textarea id="importPaste" class="qtyInput" style="width:100%;min-height:90px;margin-top:8px;font-family:var(--font-mono);font-size:11px" placeholder="CSV 내용을 통째로 붙여넣고 아래 버튼을 누르세요" hidden></textarea>
       <div class="row" id="importPasteRow" style="margin-top:8px" hidden><button class="btn sm primary" id="importPasteGo">붙여넣은 내용 읽기</button></div>
@@ -2072,14 +2072,28 @@ function parseRobinhoodActivity(rows) {
   return { broker: "robinhood", etf, range: [minDate, maxDate], buys, sells, divs };
 }
 let importPending = null;
+// "업데이트 파일"(JSON): 피델리티 CSV + 현금 계좌 잔고를 한 파일로 묶은 것. 사용자가 보낸 자료로 만들어 전달하면
+// 앱에서 이 파일 하나만 고르면 반영됨(데이터는 기기에만 저장, 코드엔 안 들어감).
+// 형식: { app: "findash-update", fidelityCsv: "<CSV 원문>", cash: [{ id, label, balance, owner, apy, kind }] }
+function parseUpdateFile(text) {
+  const t = String(text).trim();
+  if (!t.startsWith("{")) return null;
+  try { const j = JSON.parse(t); return j && j.app === "findash-update" ? j : null; } catch { return null; }
+}
 function previewFidelityCsv(text) {
   const box = $("#importPreview");
+  const upd = parseUpdateFile(text);
+  if (upd) text = upd.fidelityCsv || "";
   let p;
   try {
-    const rows = parseCsv(text);
-    const isRh = rows.slice(0, 5).some(r => r.some(c => /trans code/i.test(c)));
-    p = isRh ? parseRobinhoodActivity(rows) : parseFidelityPositions(rows);
+    if (upd && !text.trim()) p = { broker: "fidelity", etf: {}, muni: [], gov: [], mmf: [], skipped: [], accounts: [], pending: {} };
+    else {
+      const rows = parseCsv(text);
+      const isRh = rows.slice(0, 5).some(r => r.some(c => /trans code/i.test(c)));
+      p = isRh ? parseRobinhoodActivity(rows) : parseFidelityPositions(rows);
+    }
   } catch (e) { box.innerHTML = `<div class="status err">${escapeHtml(e.message)}</div>`; importPending = null; return; }
+  p.cashUpdates = upd && Array.isArray(upd.cash) ? upd.cash.filter(c => c && c.id && isFinite(c.balance)) : [];
   importPending = p;
   const syms = LS.get("etfSymbols", DEFAULT_ETFS);
   const etfRows = Object.entries(p.etf).sort((a, b) => a[0].localeCompare(b[0])).map(([sym, e]) => {
@@ -2113,6 +2127,7 @@ function previewFidelityCsv(text) {
       ${p.gov.map(h => bondLine(h, "국채")).join("")}
       ${p.mmf.map(m => `<div class="small">현금(core) ${escapeHtml(m.ticker)} $${fmtInt(m.balance)}${m.pending ? ` <span style="color:var(--muted)">(잔액 $${fmtInt(m.balance - m.pending)} − 결제 대기 $${fmtInt(-m.pending)})</span>` : ""}${m.acctName ? ` · ${escapeHtml(m.acctName)}` : ""} → 자산 탭 현금 계좌에 반영</div>`).join("")}
       ${gone.etf.length || gone.bonds.length ? `<div class="small" style="margin-top:6px;color:var(--danger)">이 계좌 CSV에 없어 빠지는 항목(매도·만기): ${escapeHtml([...gone.etf.map(g => `${g.sym}(${acctLabel(g.key)})`), ...gone.bonds.map(b => b.name)].join(", "))}</div>` : ""}
+      ${p.cashUpdates.length ? `<div class="small" style="margin-top:6px"><b>현금 · 기타 계좌</b></div>${p.cashUpdates.map(u => { const cur = cashList().find(c => c.id === u.id); return `<div class="small">${escapeHtml(u.label || (cur && cur.label) || u.id)} ${cur ? `$${fmtInt(cur.balance || 0)} → ` : "<span style='color:var(--accent)'>신규</span> "}<b>$${fmtInt(u.balance)}</b>${u.kind === "invest" ? " (투자 총액)" : ""}${u.apy ? ` · 이자 ${fmt(u.apy)}%` : ""}</div>`; }).join("")}` : ""}
       <div class="row" style="margin-top:10px"><button class="btn sm primary" id="importApply">반영하기</button><button class="btn sm" id="importCancel">취소</button></div>
       <p class="note">CSV에 들어 있는 계좌는 CSV가 기준이에요 — 그 계좌에서 CSV에 없는 종목·채권은 판 것으로 보고 빠집니다. CSV에 없는 계좌(다른 피델리티 계좌, 로빈후드 등)는 그대로예요. 개인·LLC 파일 두 개를 한 번에 골라도 돼요. 채권 가격은 CSV의 Last Price.</p>
     `;
@@ -2188,10 +2203,22 @@ function applyFidelityImport() {
     });
     LS.set("cash", list);
   }
+  if (p.cashUpdates && p.cashUpdates.length) { // 업데이트 파일의 현금 계좌: id가 같으면 잔고 등 갱신, 없으면 추가
+    const list = cashList();
+    p.cashUpdates.forEach(u => {
+      const c = list.find(x => x.id === u.id);
+      const patch = { balance: +u.balance };
+      ["label", "owner", "apy", "ticker"].forEach(k => { if (u[k] != null) patch[k] = u[k]; });
+      if ("kind" in u) patch.kind = u.kind === "invest" ? "invest" : undefined;
+      if (c) Object.assign(c, patch); else list.push({ id: u.id, label: u.label || u.id, owner: "personal", apy: 0, ...patch });
+      if (!cashIds.includes(u.id)) cashIds.push(u.id);
+    });
+    LS.set("cash", list);
+  }
   LS.set("lastImportAt", Date.now());
   markAsOf(...[...new Set(p.accounts.map(keyOf))].map(k => k && "acct:" + k), ...p.muni.concat(p.gov).map(h => "bond:" + h.cusip), ...cashIds.map(id => "cash:" + id));
   importPending = null;
-  toast(`반영했어요 — ETF·주식 ${Object.keys(p.etf).length}종목(신규 ${added}), 채권 ${p.muni.length + p.gov.length}, MMF ${p.mmf.length}. 다시 불러옵니다`);
+  toast(`반영했어요 — ETF·주식 ${Object.keys(p.etf).length}종목(신규 ${added}), 채권 ${p.muni.length + p.gov.length}, 현금 계좌 ${cashIds.length}. 다시 불러옵니다`);
   setTimeout(() => location.reload(), 900);
 }
 
